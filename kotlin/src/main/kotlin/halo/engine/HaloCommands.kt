@@ -13,6 +13,30 @@ object HaloCommands {
     val SOUND_PRESETS = setOf("pickup", "laser", "explosion", "powerup", "hit", "jump", "blip")
 
     /**
+     * `DEVICE_STATUS` (0x72) battery response: `[level][voltage_mv u16][charging]`.
+     * Device-to-host payload; built here so the state machine and simulated
+     * transports share the encoding.
+     */
+    fun batteryStatus(level: Int, voltageMv: Int, charging: Boolean): ByteArray =
+        byteArrayOf(
+            level.coerceIn(0, 100).toByte(),
+            (voltageMv ushr 8).toByte(), voltageMv.toByte(),
+            if (charging) 1 else 0,
+        )
+
+    /** `BUTTON` (0x0B) device-to-host event: single gesture byte. */
+    fun buttonEvent(gesture: Int): ByteArray = byteArrayOf(gesture.toByte())
+
+    /** `CLEAR_DISPLAY` (0x10): no payload. */
+    fun clearDisplay(): ByteArray = byteArrayOf()
+
+    /** `PLAIN_TEXT` (0x11): UTF-8 text drawn line by line on the display. */
+    fun plainText(text: String): ByteArray = text.toByteArray(Charsets.UTF_8)
+
+    /** `TAP` (0x09) device-to-host event: single kind byte. */
+    fun tapEvent(kind: Int): ByteArray = byteArrayOf(kind.toByte())
+
+    /**
      * `SOUND_PLAY` (0x50): flags byte (b0=volume, b1=duration, b2=seed),
      * optional fields in that order, then the preset name.
      */

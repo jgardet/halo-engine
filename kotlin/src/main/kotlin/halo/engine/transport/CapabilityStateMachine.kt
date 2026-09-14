@@ -122,6 +122,7 @@ class CapabilityStateMachine(
     /** Boot sequence: emit STATUS with capability string. */
     fun boot() {
         val caps = "HRP1;primitives,sprites,click,tap,mic,speaker,photo,battery,sound,system,time,imu" +
+            ",mpix,lz4" +
             ";fw=" + config.firmwareVersion +
             if (config.eui.isNotEmpty()) ";eui=" + config.eui else ""
         emit(DeviceEvent.Message(HaloProtocol.STATUS, caps.toByteArray()))
@@ -139,11 +140,11 @@ class CapabilityStateMachine(
                 handleHrp(payload)
                 return true
             }
-            0x10 -> { // CLEAR_DISPLAY
+            HaloProtocol.CLEAR_DISPLAY -> {
                 clearDisplay()
                 return true
             }
-            0x11 -> { // PLAIN_TEXT
+            HaloProtocol.PLAIN_TEXT -> {
                 handlePlainText(payload)
                 return true
             }
@@ -396,25 +397,22 @@ class CapabilityStateMachine(
     // ------------------------------------------------------------------ battery
 
     private fun sendBattery() {
-        val payload = byteArrayOf(
-            config.batteryLevel.toByte(),
-            (config.batteryVoltage ushr 8).toByte(),
-            (config.batteryVoltage and 0xFF).toByte(),
-            if (config.batteryCharging) 1 else 0,
-        )
-        emit(DeviceEvent.Message(HaloProtocol.DEVICE_STATUS, payload))
+        emit(DeviceEvent.Message(
+            HaloProtocol.DEVICE_STATUS,
+            HaloCommands.batteryStatus(config.batteryLevel, config.batteryVoltage, config.batteryCharging),
+        ))
     }
 
     // ------------------------------------------------------------------ input
 
     /** Inject a button event (single=1, double=2, long=3). */
     fun buttonEvent(gesture: Int) {
-        emit(DeviceEvent.Message(HaloProtocol.BUTTON, byteArrayOf(gesture.toByte())))
+        emit(DeviceEvent.Message(HaloProtocol.BUTTON, HaloCommands.buttonEvent(gesture)))
     }
 
     /** Inject a tap event (single=1, double=2, triple=3). */
     fun tapEvent(kind: Int) {
-        emit(DeviceEvent.Message(HaloProtocol.TAP, byteArrayOf(kind.toByte())))
+        emit(DeviceEvent.Message(HaloProtocol.TAP, HaloCommands.tapEvent(kind)))
     }
 
     // ------------------------------------------------------------------ state queries

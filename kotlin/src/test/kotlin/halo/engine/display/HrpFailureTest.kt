@@ -160,8 +160,8 @@ class HrpFailureTest {
     }
 
     @Test
-    fun compressedSpriteThrowsPayloadContentFailure() {
-        // spriteDefine with compressed=1
+    fun invalidCompressedSpriteThrowsPayloadContentFailure() {
+        // spriteDefine with compressed=1 but garbage (non-LZ4) pixel data
         val defPayload = ByteArray(9)
         defPayload[6] = 1  // compressed
         defPayload[7] = 4  // bpp
@@ -170,7 +170,7 @@ class HrpFailureTest {
         val ex = assertFailsWith<HrpFailure> { HrpRenderer().render(payload) }
         assertEquals(HrpFailure.Category.PAYLOAD_CONTENT, ex.category)
         assertEquals(0x0A, ex.opcode)
-        assertTrue(ex.message!!.contains("compressed sprites"))
+        assertTrue(ex.message!!.contains("decompress"))
     }
 
     @Test

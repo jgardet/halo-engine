@@ -30,6 +30,8 @@ object HaloProtocol {
     const val TAP = 0x09
     const val IMU = 0x0A
     const val BUTTON = 0x0B
+    const val CLEAR_DISPLAY = 0x10
+    const val PLAIN_TEXT = 0x11
     const val CAPTURE_PHOTO = 0x20
     const val MICROPHONE_START = 0x30
     const val MICROPHONE_STOP = 0x31

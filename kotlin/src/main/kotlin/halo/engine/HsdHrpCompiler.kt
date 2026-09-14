@@ -14,6 +14,7 @@ class HsdHrpCompiler(
     private val packer: SpritePacker,
     private val limits: HaloLimits = StockHaloLimits,
     private val validator: HsdValidator = HsdValidator(limits),
+    private val lz4Sprites: Boolean = false,
 ) {
     fun compile(document: JsonElement): ByteArray {
         validator.validate(document)
@@ -104,7 +105,7 @@ class HsdHrpCompiler(
                         element["h"]?.jsonPrimitive?.intOrNull,
                         element.int("bpp", 4),
                     )
-                    val packed = HaloHost.packSpriteAsset(sprite)
+                    val packed = HaloHost.packSpriteAsset(sprite, compress = lz4Sprites)
                     require(packed.size <= limits.maxAssetBytes) { "Sprite exceeds conservative stock asset budget" }
                     builder.spriteDefine(id, packed)
                 }

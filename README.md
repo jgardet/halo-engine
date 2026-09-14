@@ -51,9 +51,14 @@ The same message layer also powers agent-facing device capabilities: microphone 
 - `HaloMessage` and `HaloSession` for request/response and chunk-based streaming with cancellation and bounded collection.
 - `HaloLimitException` to abort streaming when a per-operation byte ceiling is exceeded.
 - `BluetoothGattChannel` for the Android BLE transport, including bounded in-flight audio write pacing so `WRITE_TYPE_NO_RESPONSE` speaker frames stream without blocking on every callback.
+- `HaloLz4` for LZ4 frame compression. `HaloRuntimeInstaller` uploads `he_runtime.lua` as compressed hex decoded by the stock `frame.compression` API (falling back to escaped-string upload), and sprite assets are LZ4-framed when the runtime advertises the `lz4` capability.
 - `lua/he_runtime.lua` as the device-side dispatcher for microphone, speaker, camera, battery, and input events.
 
 These abstractions live in `kotlin/` and `android/` and are consumed by the `dsh-android` agent-senses layer.
+
+### Why HSD instead of Google's A2UI?
+
+[A2UI](https://a2ui.org/) describes high-level interactive widgets (buttons, text fields, date pickers) that a client-side renderer maps to a native toolkit — a great fit for phones and browsers, but Halo has no widget toolkit to render into. Its display is a 256×256 circular area driven by Lua drawing primitives over a BLE byte budget, with tap-only input. HSD speaks that reality directly: pixel-precise primitives that compile to bounded Lua or binary HRP, with nothing lost in translation. An A2UI layer would still need a component→pixel compiler — which is exactly what this engine already is.
 
 ## Why Python, Kotlin, and Lua?
 

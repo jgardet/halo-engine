@@ -34,16 +34,31 @@ class HaloHost(
     }
 
     companion object {
-        fun packSpriteAsset(sprite: SpritePacker.Sprite): ByteArray {
+        /**
+         * Serialize a sprite into the HRP `spriteDefine` asset format:
+         * `[w u16][h u16][compressed][bpp][numColors][palette][pixels]`.
+         *
+         * When [compress] is true the packed pixels are LZ4-framed and the
+         * compressed flag is set — but only when that actually shrinks the
+         * payload. The receiving runtime must advertise the `lz4`
+         * capability (`frame.compression`); older runtimes reject
+         * compressed sprites.
+         */
+        fun packSpriteAsset(sprite: SpritePacker.Sprite, compress: Boolean = false): ByteArray {
             val bits = packIndexedPixels(sprite.pixelData, sprite.bpp)
+            val compressed = if (compress) {
+                runCatching { HaloLz4.compress(bits) }.getOrNull()?.takeIf { it.size < bits.size }
+            } else {
+                null
+            }
             val header = java.nio.ByteBuffer.allocate(7)
                 .putShort(sprite.width.toShort())
                 .putShort(sprite.height.toShort())
-                .put(0)
+                .put(if (compressed != null) 1 else 0)
                 .put(sprite.bpp.toByte())
                 .put(sprite.numColors.toByte())
                 .array()
-            return header + sprite.paletteData + bits
+            return header + sprite.paletteData + (compressed ?: bits)
         }
     }
 }

@@ -178,3 +178,48 @@ def test_runtime_tap_config(tmp_path):
         assert any(b"bad tap mode" in e for e in _errors(emu.get_bluetooth_sent()))
     finally:
         emu.stop()
+
+
+def _hrp(*commands: tuple[int, bytes]) -> bytes:
+    body = b"".join(
+        bytes((opcode, len(payload) >> 8, len(payload) & 0xFF)) + payload
+        for opcode, payload in commands
+    )
+    return b"HRP1" + b"\x00" + bytes((0, len(commands))) + body
+
+
+def test_runtime_compressed_sprite(tmp_path):
+    import lz4.frame
+
+    shutil.copy2(PROJECT_LUA, tmp_path / "main.lua")
+    emu = HaloEmulator(sandbox_dir=tmp_path)
+    emu.start("main.lua")
+    try:
+        time.sleep(0.1)
+        # The runtime should advertise the lz4 capability when
+        # frame.compression exists.
+        sent = emu.get_bluetooth_sent()
+        assert any(item.startswith(b"\x70HRP1;") and b"lz4" in item for item in sent)
+
+        # 8x8, 1bpp sprite, all pixels index 1 -> packed bits are 0xFF * 8.
+        # Palette: index 0 black, index 1 white.
+        packed_pixels = b"\xFF" * 8
+        palette = bytes((0, 0, 0, 255, 255, 255))
+        asset = (
+            bytes((0, 8, 0, 8, 1, 1, 2)) + palette + lz4.frame.compress(packed_pixels)
+        )
+        define = bytes((0, 1)) + asset           # spriteDefine id=1
+        draw = bytes((0, 1, 0, 10, 0, 10, 0))    # spriteDraw id=1 at (10,10)
+        emu.inject_bluetooth_data(_message(HRP_CODE, _hrp((0x0A, define), (0x0B, draw))))
+        time.sleep(0.1)
+        assert not _errors(emu.get_bluetooth_sent())
+        r, g, b = emu.get_framebuffer().getpixel((10, 10))[:3]
+        assert (r, g, b) == (255, 255, 255)
+
+        # Corrupt LZ4 data reports a device error.
+        bad = bytes((0, 2)) + bytes((0, 8, 0, 8, 1, 1, 2)) + palette + b"not-lz4"
+        emu.inject_bluetooth_data(_message(HRP_CODE, _hrp((0x0A, bad))))
+        time.sleep(0.1)
+        assert any(b"sprite decompress failed" in e for e in _errors(emu.get_bluetooth_sent()))
+    finally:
+        emu.stop()

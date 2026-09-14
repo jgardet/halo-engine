@@ -13,6 +13,13 @@ import kotlinx.coroutines.withTimeout
 class HaloRuntimeInstaller(
     private val transport: AndroidBleTransport,
     private val runtimeFileName: String = "halo_engine.lua",
+    /**
+     * Invoked when the compressed upload path is skipped or fails and the
+     * install falls back to legacy escaped-string writes. Carries the
+     * cause — a host-side compression failure or the device-side
+     * timeout/rejection. Null disables reporting.
+     */
+    private val onFallback: ((cause: Throwable) -> Unit)? = null,
 ) {
     /**
      * Installs the runtime from a [HaloRuntimeSource] and starts it.
@@ -42,13 +49,69 @@ class HaloRuntimeInstaller(
     }
 
     private suspend fun upload(source: String) {
+        // Prefer an LZ4-framed upload decoded by the stock firmware's
+        // frame.compression API. The compressed bytes travel as hex inside
+        // ordinary Lua string literals — 2x expansion still beats the
+        // escaped-source path, and every line stays small enough for the
+        // negotiated BLE payload. Any failure falls back to legacy upload
+        // and is reported via onFallback so the degradation is observable.
+        val lz4 = try {
+            HaloLz4.compress(source.toByteArray(Charsets.UTF_8))
+        } catch (e: Throwable) {
+            fallback("host LZ4 compression failed", e)
+            null
+        }
+        if (lz4 != null) {
+            try {
+                uploadCompressed(lz4)
+                return
+            } catch (e: Throwable) {
+                // Swallow only an inner failure (e.g. status timeout); a
+                // cancelled install must still propagate.
+                currentCoroutineContext().ensureActive()
+                fallback("compressed runtime upload failed", e)
+            }
+        }
+        uploadLegacy(source)
+    }
+
+    private fun fallback(reason: String, cause: Throwable) {
+        android.util.Log.w("HaloRuntimeInstaller", "$reason — using legacy upload", cause)
+        runCatching { onFallback?.invoke(cause) }
+    }
+
+    private suspend fun uploadCompressed(lz4: ByteArray) {
+        val ack = "frame.bluetooth.send(string.char(${HaloProtocol.STATUS}) .. 'ok')"
+        val overhead = "z=z..'';$ack".toByteArray(Charsets.UTF_8).size
+        val chunkSize = transport.maxLuaPayload - overhead
+        require(chunkSize > 0) { "Negotiated MTU is too small for runtime upload" }
+
+        transport.sendLuaAwaitStatus("z='';$ack", expectedPayload = "ok")
+        val hex = StringBuilder(lz4.size * 2)
+        lz4.forEach { hex.append("%02x".format(it.toInt() and 0xFF)) }
+        hex.chunked(chunkSize).forEach { chunk ->
+            currentCoroutineContext().ensureActive()
+            transport.sendLuaAwaitStatus("z=z..'$chunk';$ack", expectedPayload = "ok")
+        }
+        transport.sendLuaAwaitStatus(
+            "z=(z:gsub('..',function(h) return string.char(tonumber(h,16)) end));" +
+                "f=frame.file.open('$runtimeFileName','w');" +
+                "frame.compression.process_function(function(d) f:write(d) end);" +
+                "local ok=pcall(frame.compression.decompress,z,4096);" +
+                "frame.compression.process_function(nil);f:close();z=nil;" +
+                "frame.bluetooth.send(string.char(${HaloProtocol.STATUS}) .. (ok and 'ok' or 'lz4fail'))",
+            expectedPayload = "ok",
+        )
+    }
+
+    private suspend fun uploadLegacy(source: String) {
         val escaped = source.replace("\r", "")
             .replace("\\", "\\\\")
             .replace("\n", "\\n")
             .replace("\t", "\\t")
             .replace("\"", "\\\"")
         val ack = "frame.bluetooth.send(string.char(${HaloProtocol.STATUS}) .. 'ok')"
-        transport.sendLuaAwaitStatus("f=frame.file.open('$runtimeFileName','w');$ack", expectedPayload = "ok")
+        transport.sendLuaAwaitStatus("z=nil;f=frame.file.open('$runtimeFileName','w');$ack", expectedPayload = "ok")
         val overhead = "f:write(\"\");$ack".toByteArray(Charsets.UTF_8).size
         val chunkSize = transport.maxLuaPayload - overhead
         require(chunkSize > 0) { "Negotiated MTU is too small for runtime upload" }

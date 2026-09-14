@@ -23,6 +23,9 @@ __pycache__/
 *.pfx
 *.pem
 
+# Local machine configuration
+local.properties
+
 # IDEs
 .idea/
 .vscode/

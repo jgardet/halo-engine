@@ -82,4 +82,18 @@ class HaloCommandsTest {
         assertContentEquals(byteArrayOf(0x01, 0x2C), payload.copyOfRange(2, 4)) // 300
         assertEquals(0, payload[4].toInt()) // wait_for_timeout=false
     }
+
+    @Test
+    fun batteryStatusEncodesDeviceStatusPayload() {
+        assertContentEquals(
+            byteArrayOf(75, 0x0E, 0x74, 1), // 75%, 3700 mV, charging
+            HaloCommands.batteryStatus(75, 3700, true),
+        )
+    }
+
+    @Test
+    fun inputEventsAreSingleGestureBytes() {
+        assertContentEquals(byteArrayOf(2), HaloCommands.buttonEvent(2))
+        assertContentEquals(byteArrayOf(3), HaloCommands.tapEvent(3))
+    }
 }

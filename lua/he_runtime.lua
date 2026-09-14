@@ -139,12 +139,20 @@ local function parse_sprite(payload)
     local compressed = string.byte(raw, 5) > 0
     local bpp = string.byte(raw, 6)
     local num_colors = string.byte(raw, 7)
-    if compressed then error('compressed HRP sprites are not enabled') end
     if bpp ~= 1 and bpp ~= 2 and bpp ~= 4 then error('invalid HRP sprite bpp') end
     local palette_start = 8
     local palette_len = num_colors * 3
     require_len(raw, palette_start, palette_len)
     local pixels = string.sub(raw, palette_start + palette_len)
+    if compressed then
+        if frame.compression == nil then error('compressed sprites require frame.compression') end
+        local blocks = {}
+        frame.compression.process_function(function(d) blocks[#blocks + 1] = d end)
+        local ok, err = pcall(frame.compression.decompress, pixels, 4096)
+        frame.compression.process_function(nil)
+        if not ok then error('sprite decompress failed: ' .. tostring(err)) end
+        pixels = table.concat(blocks)
+    end
     sprites[id] = {
         width = width,
         height = height,
@@ -643,9 +651,10 @@ local function handle_message(code, payload)
         if quality_index > 4 then quality_index = 4 end
         local quality = QUALITIES[quality_index + 1]
         local resolution = half_res * 2
-        local pan = pan_shifted - 140
-        local cfg = { resolution = resolution, quality = quality, pan = pan }
-        if raw then cfg.raw = true end
+        -- Halo's capture() accepts only resolution and quality; pan and raw
+        -- are Frame-era fields kept on the wire for compatibility but never
+        -- passed to the firmware (raw is a read mode, see read_raw()).
+        local cfg = { resolution = resolution, quality = quality }
         if #payload >= 7 then
             local ok, err = pcall(apply_mpix_ops, payload, 7)
             if not ok then
@@ -701,7 +710,9 @@ local eui_suffix = ''
 pcall(function() eui_suffix = ';eui=' .. tostring(frame.get_eui()) end)
 local mpix_suffix = ''
 pcall(function() if mpix_available() then mpix_suffix = ';mpix' end end)
-send_event(STATUS_CODE, 'HRP1;primitives,sprites,click,tap,mic,speaker,photo,battery,sound,system,time,imu' .. mpix_suffix .. ';fw=' .. fw_version .. eui_suffix)
+local lz4_suffix = ''
+pcall(function() if frame.compression ~= nil then lz4_suffix = ',lz4' end end)
+send_event(STATUS_CODE, 'HRP1;primitives,sprites,click,tap,mic,speaker,photo,battery,sound,system,time,imu' .. mpix_suffix .. lz4_suffix .. ';fw=' .. fw_version .. eui_suffix)
 print('Halo Engine v3 ready')
 
 while true do

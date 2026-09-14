@@ -2,6 +2,7 @@ package halo.engine.display
 
 import halo.engine.HaloColor
 import halo.engine.HaloLimits
+import halo.engine.HaloLz4
 import halo.engine.StockHaloLimits
 import halo.engine.validateHrpMessage
 
@@ -222,10 +223,6 @@ class HrpRenderer(
         val width = u16(payload, 2)
         val height = u16(payload, 4)
         val compressed = payload[6].toInt() and 0xFF
-        if (compressed != 0) {
-            throw HrpFailure.Command(HrpFailure.Category.PAYLOAD_CONTENT, cmdOffset, cmdIndex, 0x0A,
-                "compressed sprites are not supported")
-        }
         if (payload.size < 9) {
             throw HrpFailure.Command(HrpFailure.Category.PAYLOAD_SIZE, cmdOffset, cmdIndex, 0x0A,
                 "spriteDefine expects at least 9 bytes (header+bpp+numColors), got ${payload.size}")
@@ -242,7 +239,17 @@ class HrpRenderer(
                 "spriteDefine palette truncated: need $paletteSize bytes for $numColors colors, got ${payload.size - 9}")
         }
         val palette = payload.copyOfRange(9, 9 + paletteSize)
-        val pixelData = payload.copyOfRange(9 + paletteSize, payload.size)
+        val rawPixels = payload.copyOfRange(9 + paletteSize, payload.size)
+        val pixelData = if (compressed != 0) {
+            try {
+                HaloLz4.decompress(rawPixels)
+            } catch (e: Exception) {
+                throw HrpFailure.Command(HrpFailure.Category.PAYLOAD_CONTENT, cmdOffset, cmdIndex, 0x0A,
+                    "sprite LZ4 decompress failed: ${e.message}")
+            }
+        } else {
+            rawPixels
+        }
         sprites[id] = SpriteAsset(width, height, bpp, numColors, palette, pixelData)
     }
 
