@@ -40,6 +40,87 @@ object HaloCommands {
         return out.toByteArray()
     }
 
+    /**
+     * One op in the optional `frame.camera.mpix` pipeline tail of
+     * `CAPTURE_PHOTO`. The runtime inserts these between the auto
+     * white/black-level correction and `jpeg_encode`.
+     */
+    sealed class MpixOp {
+        internal abstract fun encode(): ByteArray
+
+        class Crop(val x: Int, val y: Int, val w: Int, val h: Int) : MpixOp() {
+            override fun encode(): ByteArray = byteArrayOf(
+                0x01,
+                (x ushr 8).toByte(), x.toByte(),
+                (y ushr 8).toByte(), y.toByte(),
+                (w ushr 8).toByte(), w.toByte(),
+                (h ushr 8).toByte(), h.toByte(),
+            )
+        }
+
+        class ResizeSubsample(val w: Int, val h: Int) : MpixOp() {
+            override fun encode(): ByteArray = byteArrayOf(
+                0x02,
+                (w ushr 8).toByte(), w.toByte(),
+                (h ushr 8).toByte(), h.toByte(),
+            )
+        }
+
+        object Denoise3x3 : MpixOp() {
+            override fun encode(): ByteArray = byteArrayOf(0x03)
+        }
+
+        object Denoise5x5 : MpixOp() {
+            override fun encode(): ByteArray = byteArrayOf(0x04)
+        }
+
+        class Convolve3x3(val kernel: Kernel) : MpixOp() {
+            override fun encode(): ByteArray = byteArrayOf(0x05, kernel.id.toByte())
+        }
+
+        class Convolve5x5(val kernel: Kernel) : MpixOp() {
+            override fun encode(): ByteArray = byteArrayOf(0x06, kernel.id.toByte())
+        }
+
+        /** JPEG quality 0–100 applied via `mpix.cid.JPEG_QUALITY`. */
+        class JpegQuality(val quality: Int) : MpixOp() {
+            override fun encode(): ByteArray =
+                byteArrayOf(0x07, quality.coerceIn(0, 100).toByte())
+        }
+
+        enum class Kernel(val id: Int) {
+            EDGE_DETECT(0),
+            GAUSSIAN_BLUR(1),
+            IDENTITY(2),
+            SHARPEN(3),
+        }
+    }
+
+    /**
+     * `CAPTURE_PHOTO` (0x20): `[quality][half_res u16][pan u16][raw]` plus an
+     * optional `[op_count]` + encoded [ops] tail. An empty [ops] list emits
+     * the legacy 6-byte payload.
+     */
+    fun capturePhoto(
+        qualityIndex: Int = 4,
+        halfResolution: Int = 320,
+        panShifted: Int = 140,
+        raw: Boolean = false,
+        ops: List<MpixOp> = emptyList(),
+    ): ByteArray {
+        require(qualityIndex in 0..4) { "qualityIndex out of range: $qualityIndex" }
+        require(ops.size <= 255) { "too many mpix ops: ${ops.size}" }
+        val base = byteArrayOf(
+            qualityIndex.toByte(),
+            (halfResolution ushr 8).toByte(), halfResolution.toByte(),
+            (panShifted ushr 8).toByte(), panShifted.toByte(),
+            if (raw) 1 else 0,
+        )
+        if (ops.isEmpty()) return base
+        return base + byteArrayOf(ops.size.toByte()) +
+            ops.fold(ByteArray(0)) { acc, op -> acc + op.encode() }
+    }
+
     /** `SYSTEM` (0x51): subcommand byte + optional argument bytes. */
     fun system(subcommand: Int, arg: ByteArray = byteArrayOf()): ByteArray =
         byteArrayOf(subcommand.toByte()) + arg

@@ -458,6 +458,88 @@ local function handle_tap_config(payload)
     frame.imu.tap_config(opts)
 end
 
+-- Optional mpix pipeline tail on CAPTURE_PHOTO. Byte 7 is an op count,
+-- then per-op entries: 0x01 crop(x,y,w,h u16) · 0x02 resize_subsample(w,h
+-- u16) · 0x03 denoise_3x3 · 0x04 denoise_5x5 · 0x05 conv3x3(kernel u8) ·
+-- 0x06 conv5x5(kernel u8) · 0x07 jpeg_quality(u8). When ops are present the
+-- default pipeline is rebuilt with them inserted before jpeg_encode.
+local MPIX_KERNELS = { [0] = 'edge_detect', 'gaussian_blur', 'identity', 'sharpen' }
+local mpixCustom = false
+
+local function mpix_available()
+    return frame.camera ~= nil and frame.camera.mpix ~= nil
+end
+
+local function apply_mpix_ops(payload, pos)
+    if not mpix_available() then error('mpix unavailable') end
+    local op = frame.camera.mpix.op
+    require_len(payload, pos, 1)
+    local count = string.byte(payload, pos)
+    pos = pos + 1
+    local ops = {}
+    local ctrls = {}
+    for _ = 1, count do
+        require_len(payload, pos, 1)
+        local code = string.byte(payload, pos)
+        pos = pos + 1
+        if code == 0x01 then
+            require_len(payload, pos, 8)
+            local x, y, w, h = u16(payload, pos), u16(payload, pos + 2),
+                u16(payload, pos + 4), u16(payload, pos + 6)
+            table.insert(ops, function(p) op.crop(p, x, y, w, h) end)
+            pos = pos + 8
+        elseif code == 0x02 then
+            require_len(payload, pos, 4)
+            local w, h = u16(payload, pos), u16(payload, pos + 2)
+            table.insert(ops, function(p) op.resize_subsample(p, w, h) end)
+            pos = pos + 4
+        elseif code == 0x03 then
+            table.insert(ops, function(p) op.kernel_denoise_3x3(p) end)
+        elseif code == 0x04 then
+            table.insert(ops, function(p) op.kernel_denoise_5x5(p) end)
+        elseif code == 0x05 or code == 0x06 then
+            require_len(payload, pos, 1)
+            local kernel = MPIX_KERNELS[string.byte(payload, pos)]
+                or error('bad mpix kernel')
+            local conv = (code == 0x05) and op.kernel_convolve_3x3 or op.kernel_convolve_5x5
+            table.insert(ops, function(p) conv(p, kernel) end)
+            pos = pos + 1
+        elseif code == 0x07 then
+            require_len(payload, pos, 1)
+            local q = string.byte(payload, pos)
+            table.insert(ctrls, function()
+                frame.camera.mpix.set_ctrl(frame.camera.mpix.cid.JPEG_QUALITY, q)
+            end)
+            pos = pos + 1
+        else
+            error('unknown mpix op ' .. tostring(code))
+        end
+    end
+    for _, fn in ipairs(ctrls) do fn() end
+    local pipeline = {}
+    op.debayer_2x2(pipeline)
+    op.correct_black_level(pipeline)
+    op.correct_white_balance(pipeline)
+    for _, fn in ipairs(ops) do fn(pipeline) end
+    op.jpeg_encode(pipeline)
+    frame.camera.mpix.set_pipeline(pipeline)
+    mpixCustom = true
+end
+
+-- Restore the firmware default pipeline after a custom one was installed.
+local function reset_mpix_pipeline()
+    if not mpixCustom then return end
+    if not mpix_available() then return end
+    local op = frame.camera.mpix.op
+    local pipeline = {}
+    op.debayer_2x2(pipeline)
+    op.correct_black_level(pipeline)
+    op.correct_white_balance(pipeline)
+    op.jpeg_encode(pipeline)
+    pcall(frame.camera.mpix.set_pipeline, pipeline)
+    mpixCustom = false
+end
+
 -- Message dispatch.
 local function handle_message(code, payload)
     if code == HRP_CODE then
@@ -564,6 +646,15 @@ local function handle_message(code, payload)
         local pan = pan_shifted - 140
         local cfg = { resolution = resolution, quality = quality, pan = pan }
         if raw then cfg.raw = true end
+        if #payload >= 7 then
+            local ok, err = pcall(apply_mpix_ops, payload, 7)
+            if not ok then
+                send_event(ERROR_CODE, 'mpix failed: ' .. tostring(err))
+                return
+            end
+        else
+            reset_mpix_pipeline()
+        end
         -- The camera may be in power save after the previous capture.
         pcall(frame.camera.power_save, false)
         local ok, err = pcall(frame.camera.capture, cfg)
@@ -608,7 +699,9 @@ local fw_version = 'unknown'
 pcall(function() fw_version = tostring(frame.FIRMWARE_VERSION or 'unknown') end)
 local eui_suffix = ''
 pcall(function() eui_suffix = ';eui=' .. tostring(frame.get_eui()) end)
-send_event(STATUS_CODE, 'HRP1;primitives,sprites,click,tap,mic,speaker,photo,battery,sound,system,time,imu;fw=' .. fw_version .. eui_suffix)
+local mpix_suffix = ''
+pcall(function() if mpix_available() then mpix_suffix = ';mpix' end end)
+send_event(STATUS_CODE, 'HRP1;primitives,sprites,click,tap,mic,speaker,photo,battery,sound,system,time,imu' .. mpix_suffix .. ';fw=' .. fw_version .. eui_suffix)
 print('Halo Engine v3 ready')
 
 while true do
