@@ -1,5 +1,7 @@
--- Halo device-side runtime (v2)
--- Supports HRP display, microphone, speaker, camera, battery, and input events.
+-- Halo device-side runtime (v3)
+-- Supports HRP display, microphone, speaker, camera, battery, input events,
+-- on-device sound effects, system/power control, clock sync, IMU reads, and
+-- tap-detector tuning.
 
 local CLEAR_DISPLAY = 0x10
 local PLAIN_TEXT = 0x11
@@ -8,12 +10,18 @@ local MICROPHONE_START = 0x30
 local MICROPHONE_STOP = 0x31
 local SPEAKER_START = 0x40
 local SPEAKER_STOP = 0x41
+local SOUND_PLAY = 0x50
+local SYSTEM = 0x51
+local SET_TIME = 0x52
+local IMU_READ = 0x53
+local TAP_CONFIG = 0x54
 local AUDIO_CHUNK = 0x05
 local AUDIO_FINAL = 0x06
 local PHOTO_JPEG = 0x07
 local PHOTO_FINAL = 0x08
 local HRP_CODE = 0x60
 local TAP_CODE = 0x09
+local IMU_CODE = 0x0A
 local BUTTON_CODE = 0x0B
 local BATTERY_CODE = 0x72
 local STATUS_CODE = 0x70
@@ -21,14 +29,37 @@ local ERROR_CODE = 0x71
 local MAX_DATA_BYTES = 32768
 
 local QUALITIES = { 'VERY_LOW', 'LOW', 'MEDIUM', 'HIGH', 'VERY_HIGH' }
+local SOUND_PRESETS = { pickup = true, laser = true, explosion = true,
+    powerup = true, hit = true, jump = true, blip = true }
+
+local SYS_DISPLAY_SLEEP = 0x00
+local SYS_DISPLAY_WAKE = 0x01
+local SYS_STANDBY = 0x02
+local SYS_LIGHT_SLEEP = 0x03
+local SYS_STAY_AWAKE = 0x04
+local SYS_SHIP_MODE = 0x05
+local SYS_CHARGE = 0x06
+local SYS_DEEP_SLEEP = 0x07
+local SYS_CAMERA_POWER = 0x08
 
 -- Minimal local equivalent of the official data.lua framing.
 local pending = {}
 local completed = {}
 local completed_count = 0
 
+-- frame.bluetooth.send fails while the radio is busy; retry briefly like the
+-- vendor data.lua does, then give up so the caller can report an error.
+local function bt_send(data)
+    for _ = 1, 3 do
+        local ok = pcall(frame.bluetooth.send, data)
+        if ok then return true end
+        frame.sleep(0.02)
+    end
+    return false
+end
+
 local function send_event(code, payload)
-    pcall(frame.bluetooth.send, string.char(code) .. (payload or ''))
+    bt_send(string.char(code) .. (payload or ''))
 end
 
 local function receive_data(packet)
@@ -66,7 +97,7 @@ local function receive_data(packet)
         send_event(ERROR_CODE, 'message length overflow')
         return
     end
-    pcall(frame.bluetooth.send, '\x01\x00\x00')
+    bt_send('\x01\x00\x00')
 end
 
 local function process_raw_items()
@@ -256,9 +287,8 @@ local function send_mic_chunks()
             break
         end
         if data ~= '' then
-            local ok, err = pcall(frame.bluetooth.send, string.char(AUDIO_CHUNK) .. data)
-            if not ok then
-                print('mic send error: ' .. tostring(err))
+            if not bt_send(string.char(AUDIO_CHUNK) .. data) then
+                print('mic send error')
                 send_event(ERROR_CODE, 'mic send failed')
                 micStreaming = false
                 break
@@ -281,15 +311,16 @@ local function send_photo()
         if chunk == nil then
             send_event(PHOTO_FINAL, '')
             photoPending = nil
+            pcall(frame.camera.power_save, true)
             collectgarbage('collect')
             break
         end
         if chunk ~= '' then
-            local ok, err = pcall(frame.bluetooth.send, string.char(PHOTO_JPEG) .. chunk)
-            if not ok then
-                print('photo send error: ' .. tostring(err))
+            if not bt_send(string.char(PHOTO_JPEG) .. chunk) then
+                print('photo send error')
                 send_event(ERROR_CODE, 'photo send failed')
                 photoPending = nil
+                pcall(frame.camera.power_save, true)
                 break
             end
         end
@@ -305,6 +336,128 @@ local function send_battery()
     send_event(BATTERY_CODE, payload)
 end
 
+-- Sound effect (SFXR preset). Payload: flags byte (b0=volume, b1=duration_ms,
+-- b2=seed), optional fields in that order, then the preset name.
+local function play_sound(payload)
+    if #payload < 2 then error('sound payload too short') end
+    local flags = string.byte(payload, 1)
+    local pos = 2
+    local opts = {}
+    if flags & 1 ~= 0 then
+        require_len(payload, pos, 1)
+        opts.volume = string.byte(payload, pos)
+        pos = pos + 1
+    end
+    if flags & 2 ~= 0 then
+        require_len(payload, pos, 2)
+        opts.duration_ms = u16(payload, pos)
+        pos = pos + 2
+    end
+    if flags & 4 ~= 0 then
+        require_len(payload, pos, 2)
+        opts.seed = u16(payload, pos)
+        pos = pos + 2
+    end
+    local name = string.sub(payload, pos)
+    if not SOUND_PRESETS[name] then error('unknown sound preset') end
+    local ok, err = frame.sound.play_async(name, opts)
+    if not ok then error('sound failed: ' .. tostring(err)) end
+end
+
+-- System/power subcommands.
+local function handle_system(payload)
+    if #payload < 1 then error('system payload too short') end
+    local sub = string.byte(payload, 1)
+    if sub == SYS_DISPLAY_SLEEP then
+        frame.display.power_save(true)
+    elseif sub == SYS_DISPLAY_WAKE then
+        frame.display.power_save(false)
+    elseif sub == SYS_STANDBY then
+        local sec = (#payload >= 3) and u16(payload, 2) or 0
+        if sec > 0 then frame.standby(sec) else frame.standby() end
+    elseif sub == SYS_LIGHT_SLEEP then
+        local sec = (#payload >= 3) and u16(payload, 2) or 0
+        if sec > 0 then frame.light_sleep(sec) else frame.light_sleep() end
+    elseif sub == SYS_STAY_AWAKE then
+        require_len(payload, 2, 1)
+        frame.stay_awake(string.byte(payload, 2) ~= 0)
+    elseif sub == SYS_SHIP_MODE then
+        frame.ship_mode()
+    elseif sub == SYS_CHARGE then
+        require_len(payload, 2, 1)
+        frame.charge(string.byte(payload, 2) ~= 0)
+    elseif sub == SYS_DEEP_SLEEP then
+        local sec = (#payload >= 3) and u16(payload, 2) or 0
+        if sec > 0 then frame.sleep(sec) else frame.sleep() end
+    elseif sub == SYS_CAMERA_POWER then
+        require_len(payload, 2, 1)
+        frame.camera.power_save(string.byte(payload, 2) ~= 0)
+    else
+        error('unknown system subcommand ' .. tostring(sub))
+    end
+end
+
+-- Clock sync. Payload: u32 unix seconds (big-endian) + optional zone string.
+local function handle_set_time(payload)
+    if #payload < 4 then error('set_time payload too short') end
+    local ts = (string.byte(payload, 1) << 24) | (string.byte(payload, 2) << 16)
+        | (string.byte(payload, 3) << 8) | string.byte(payload, 4)
+    frame.time.utc(ts)
+    if #payload > 4 then
+        frame.time.zone(string.sub(payload, 5))
+    end
+end
+
+-- IMU snapshot: direction (pitch/roll, deg) + raw compass (µT) and
+-- accelerometer (mg), as a ';'-separated string the host parses.
+local function send_imu()
+    local dir = frame.imu.direction()
+    local raw = frame.imu.raw()
+    local compass = raw.compass or {}
+    local accel = raw.accelerometer or {}
+    send_event(IMU_CODE, string.format('%.2f;%.2f;%.1f;%.1f;%.1f;%.1f;%.1f;%.1f',
+        dir.pitch or 0, dir.roll or 0,
+        compass.x or 0, compass.y or 0, compass.z or 0,
+        accel.x or 0, accel.y or 0, accel.z or 0))
+end
+
+-- Tap detector tuning. Flags select which fields are present, in order:
+-- b0=mode, b1=axis, b2=threshold(u16), b3=gesture_duration, b4=wait_for_timeout.
+local TAP_MODES = { [0] = 'sensitive', 'normal', 'robust' }
+local TAP_AXES = { [0] = 'x', 'y', 'z' }
+local function handle_tap_config(payload)
+    if #payload < 1 then error('tap_config payload too short') end
+    local flags = string.byte(payload, 1)
+    local pos = 2
+    local opts = {}
+    if flags & 1 ~= 0 then
+        require_len(payload, pos, 1)
+        opts.mode = TAP_MODES[string.byte(payload, pos)] or error('bad tap mode')
+        pos = pos + 1
+    end
+    if flags & 2 ~= 0 then
+        require_len(payload, pos, 1)
+        opts.axis = TAP_AXES[string.byte(payload, pos)] or error('bad tap axis')
+        pos = pos + 1
+    end
+    if flags & 4 ~= 0 then
+        require_len(payload, pos, 2)
+        opts.threshold = u16(payload, pos)
+        pos = pos + 2
+    end
+    if flags & 8 ~= 0 then
+        require_len(payload, pos, 1)
+        opts.gesture_duration = string.byte(payload, pos)
+        pos = pos + 1
+    end
+    if flags & 16 ~= 0 then
+        require_len(payload, pos, 1)
+        opts.wait_for_timeout = string.byte(payload, pos) ~= 0
+        pos = pos + 1
+    end
+    frame.imu.tap_config(opts)
+end
+
 -- Message dispatch.
 local function handle_message(code, payload)
     if code == HRP_CODE then
@@ -318,7 +471,10 @@ local function handle_message(code, payload)
     elseif code == PLAIN_TEXT then
         pcall(draw_plain_text, payload)
     elseif code == MICROPHONE_START then
-        micConfig = {}
+        micConfig = {
+            encoder = 'pcm', sample_rate = 16000, bit_depth = 16,
+            channels = 1, gain = 0, aec = true, voice = false,
+        }
         if #payload >= 3 then
             -- The wire byte is the public gain value offset by +10.
             -- Public gain range is -10..10; decode before passing to firmware.
@@ -329,36 +485,57 @@ local function handle_message(code, payload)
             micConfig.gain = gain
             micConfig.aec = string.byte(payload, 2) ~= 0
             micConfig.voice = string.byte(payload, 3) ~= 0
-        else
-            micConfig.gain = 0
-            micConfig.aec = true
-            micConfig.voice = false
         end
-        local ok, err = pcall(frame.microphone.start, {
-            encoder = 'pcm',
-            sample_rate = 16000,
-            bit_depth = 16,
-            channels = 1,
-            gain = micConfig.gain,
-            aec = micConfig.aec,
-            voice = micConfig.voice,
-            duration = 1000,
-        })
-        if ok then
-            micStreaming = true
+        if #payload >= 7 then
+            micConfig.encoder = (string.byte(payload, 4) == 1) and 'lc3' or 'pcm'
+            micConfig.sample_rate = u16(payload, 5)
+            micConfig.bit_depth = string.byte(payload, 7)
+        end
+        if #payload >= 8 then
+            micConfig.channels = string.byte(payload, 8)
+        end
+        if micConfig.encoder == 'lc3' then
+            micConfig.bit_depth = 16
+            micConfig.duration = 1000
+            if #payload >= 10 then micConfig.bitrate = u16(payload, 9) end
+        end
+        if micConfig.sample_rate ~= 8000 and micConfig.sample_rate ~= 16000 then
+            send_event(ERROR_CODE, 'unsupported mic sample rate')
+        elseif micConfig.bit_depth ~= 8 and micConfig.bit_depth ~= 16 then
+            send_event(ERROR_CODE, 'unsupported mic bit depth')
         else
-            print('mic start error: ' .. tostring(err))
-            send_event(ERROR_CODE, 'mic start failed')
+            local ok, err = pcall(frame.microphone.start, micConfig)
+            if ok then
+                micStreaming = true
+            else
+                print('mic start error: ' .. tostring(err))
+                send_event(ERROR_CODE, 'mic start failed')
+            end
         end
     elseif code == MICROPHONE_STOP then
         pcall(frame.microphone.stop)
     elseif code == SPEAKER_START then
-        local config = { encoder = 'pcm', sample_rate = 16000, bit_depth = 16, channels = 1, volume = 80, duration = 1000 }
+        local config = { encoder = 'pcm', sample_rate = 16000, bit_depth = 16, channels = 1, volume = 80 }
         if #payload >= 1 then config.encoder = (string.byte(payload, 1) == 1) and 'lc3' or 'pcm' end
         if #payload >= 3 then config.sample_rate = u16(payload, 2) end
         if #payload >= 4 then config.bit_depth = string.byte(payload, 4) end
         if #payload >= 5 then config.channels = string.byte(payload, 5) end
         if #payload >= 6 then config.volume = string.byte(payload, 6) end
+        if #payload >= 7 then
+            local g = string.byte(payload, 7)
+            if g > 12 then g = 12 end
+            if g > 0 then config.gain = g end
+        end
+        if #payload >= 8 then
+            local b = string.byte(payload, 8)
+            if b > 100 then b = 100 end
+            if b >= 10 then config.budget = b end
+        end
+        if config.encoder == 'lc3' then
+            config.duration = 1000
+            if #payload >= 10 then config.duration = u16(payload, 9) end
+            if #payload >= 12 then config.bitrate = u16(payload, 11) end
+        end
         local ok, err = pcall(frame.speaker.start, config)
         if not ok then
             print('speaker start error: ' .. tostring(err))
@@ -387,6 +564,8 @@ local function handle_message(code, payload)
         local pan = pan_shifted - 140
         local cfg = { resolution = resolution, quality = quality, pan = pan }
         if raw then cfg.raw = true end
+        -- The camera may be in power save after the previous capture.
+        pcall(frame.camera.power_save, false)
         local ok, err = pcall(frame.camera.capture, cfg)
         if ok then
             photoPending = true
@@ -396,6 +575,21 @@ local function handle_message(code, payload)
         end
     elseif code == BATTERY_CODE then
         pcall(send_battery)
+    elseif code == SOUND_PLAY then
+        local ok, err = pcall(play_sound, payload)
+        if not ok then send_event(ERROR_CODE, tostring(err)) end
+    elseif code == SYSTEM then
+        local ok, err = pcall(handle_system, payload)
+        if not ok then send_event(ERROR_CODE, tostring(err)) end
+    elseif code == SET_TIME then
+        local ok, err = pcall(handle_set_time, payload)
+        if not ok then send_event(ERROR_CODE, tostring(err)) end
+    elseif code == IMU_READ then
+        local ok, err = pcall(send_imu)
+        if not ok then send_event(ERROR_CODE, tostring(err)) end
+    elseif code == TAP_CONFIG then
+        local ok, err = pcall(handle_tap_config, payload)
+        if not ok then send_event(ERROR_CODE, tostring(err)) end
     else
         -- ignore unknown
     end
@@ -410,8 +604,12 @@ frame.imu.tap_callback(function(kind)
     send_event(TAP_CODE, string.char(codes[kind] or 1))
 end)
 frame.display.power_save(false)
-send_event(STATUS_CODE, 'HRP1;primitives,sprites,click,tap,mic,speaker,photo,battery')
-print('Halo Engine v2 ready')
+local fw_version = 'unknown'
+pcall(function() fw_version = tostring(frame.FIRMWARE_VERSION or 'unknown') end)
+local eui_suffix = ''
+pcall(function() eui_suffix = ';eui=' .. tostring(frame.get_eui()) end)
+send_event(STATUS_CODE, 'HRP1;primitives,sprites,click,tap,mic,speaker,photo,battery,sound,system,time,imu;fw=' .. fw_version .. eui_suffix)
+print('Halo Engine v3 ready')
 
 while true do
     local ok, err = pcall(function()

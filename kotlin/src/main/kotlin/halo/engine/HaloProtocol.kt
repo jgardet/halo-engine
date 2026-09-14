@@ -28,14 +28,31 @@ object HaloProtocol {
     const val PHOTO_JPEG = 0x07
     const val PHOTO_FINAL = 0x08
     const val TAP = 0x09
+    const val IMU = 0x0A
     const val BUTTON = 0x0B
     const val CAPTURE_PHOTO = 0x20
     const val MICROPHONE_START = 0x30
     const val MICROPHONE_STOP = 0x31
     const val SPEAKER_START = 0x40
     const val SPEAKER_STOP = 0x41
+    const val SOUND_PLAY = 0x50
+    const val SYSTEM = 0x51
+    const val SET_TIME = 0x52
+    const val IMU_READ = 0x53
+    const val TAP_CONFIG = 0x54
     const val HRP = 0x60
     const val STATUS = 0x70
     const val ERROR = 0x71
     const val DEVICE_STATUS = 0x72
+
+    /** Subcommand bytes for [SYSTEM] messages (see `he_runtime.lua` `handle_system`). */
+    const val SYS_DISPLAY_SLEEP = 0x00
+    const val SYS_DISPLAY_WAKE = 0x01
+    const val SYS_STANDBY = 0x02
+    const val SYS_LIGHT_SLEEP = 0x03
+    const val SYS_STAY_AWAKE = 0x04
+    const val SYS_SHIP_MODE = 0x05
+    const val SYS_CHARGE = 0x06
+    const val SYS_DEEP_SLEEP = 0x07
+    const val SYS_CAMERA_POWER_SAVE = 0x08
 }

@@ -221,4 +221,45 @@ class HaloSessionTest {
 
         assertTrue(result.await().isEmpty())
     }
+
+    @Test
+    fun requestResponseFailsOnDeviceError() = runTest {
+        launch {
+            delay(10)
+            transport.emitMessage(HaloProtocol.ERROR, "not implemented".toByteArray())
+        }
+
+        val failure = assertFailsWith<HaloDeviceException> {
+            session.requestResponse(
+                requestCode = HaloProtocol.DEVICE_STATUS,
+                requestPayload = byteArrayOf(),
+                responseCode = HaloProtocol.DEVICE_STATUS,
+                timeout = 5.seconds,
+            )
+        }
+        assertEquals("not implemented", failure.message)
+    }
+
+    @Test
+    fun collectFailsOnDeviceErrorAndSendsStop() = runTest {
+        launch {
+            delay(10)
+            transport.emitMessage(HaloProtocol.AUDIO_CHUNK, byteArrayOf(1, 2, 3))
+            transport.emitMessage(HaloProtocol.ERROR, "mic unavailable".toByteArray())
+        }
+
+        val failure = assertFailsWith<HaloDeviceException> {
+            session.collect(
+                startCode = HaloProtocol.MICROPHONE_START,
+                startPayload = byteArrayOf(),
+                stopCode = HaloProtocol.MICROPHONE_STOP,
+                chunkCode = HaloProtocol.AUDIO_CHUNK,
+                finalCode = HaloProtocol.AUDIO_FINAL,
+                timeout = 5.seconds,
+            )
+        }
+        assertEquals("mic unavailable", failure.message)
+        assertEquals(HaloProtocol.MICROPHONE_START, transport.dataChunks[0][0].toInt() and 0xff)
+        assertEquals(HaloProtocol.MICROPHONE_STOP, transport.dataChunks[1][0].toInt() and 0xff)
+    }
 }

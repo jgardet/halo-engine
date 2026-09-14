@@ -19,6 +19,13 @@ MICROPHONE_STOP = 0x31
 BATTERY_CODE = 0x72
 AUDIO_CHUNK = 0x05
 AUDIO_FINAL = 0x06
+IMU_CODE = 0x0A
+SOUND_PLAY = 0x50
+SYSTEM = 0x51
+SET_TIME = 0x52
+IMU_READ = 0x53
+TAP_CONFIG = 0x54
+ERROR_CODE = 0x71
 
 
 def test_runtime_executes_hrp(tmp_path):
@@ -73,5 +80,101 @@ def test_runtime_streams_microphone_and_reports_battery(tmp_path):
         time.sleep(0.05)
         sent = emu.get_bluetooth_sent()
         assert any(item.startswith(bytes((BATTERY_CODE,))) for item in sent)
+    finally:
+        emu.stop()
+
+
+def _errors(sent: list[bytes]) -> list[bytes]:
+    return [item for item in sent if item.startswith(bytes((ERROR_CODE,)))]
+
+
+def test_runtime_sound_and_unknown_preset(tmp_path):
+    shutil.copy2(PROJECT_LUA, tmp_path / "main.lua")
+    emu = HaloEmulator(sandbox_dir=tmp_path)
+    emu.start("main.lua")
+    try:
+        time.sleep(0.1)
+        # flags=0 then preset name — valid presets must not error.
+        emu.inject_bluetooth_data(_message(SOUND_PLAY, b"\x00blip"))
+        time.sleep(0.05)
+        assert not _errors(emu.get_bluetooth_sent())
+
+        emu.inject_bluetooth_data(_message(SOUND_PLAY, b"\x00bogus"))
+        time.sleep(0.05)
+        assert any(b"unknown sound preset" in e for e in _errors(emu.get_bluetooth_sent()))
+    finally:
+        emu.stop()
+
+
+def test_runtime_system_display_power_save(tmp_path):
+    shutil.copy2(PROJECT_LUA, tmp_path / "main.lua")
+    emu = HaloEmulator(sandbox_dir=tmp_path)
+    emu.start("main.lua")
+    try:
+        time.sleep(0.1)
+        # SYS_DISPLAY_SLEEP / SYS_DISPLAY_WAKE take no argument.
+        emu.inject_bluetooth_data(_message(SYSTEM, bytes((0x00,))))
+        time.sleep(0.05)
+        emu.inject_bluetooth_data(_message(SYSTEM, bytes((0x01,))))
+        time.sleep(0.05)
+        # SYS_STAY_AWAKE takes a single flag byte.
+        emu.inject_bluetooth_data(_message(SYSTEM, bytes((0x04, 0x01))))
+        time.sleep(0.05)
+        # An unknown subcommand reports a device error.
+        emu.inject_bluetooth_data(_message(SYSTEM, bytes((0x7F,))))
+        time.sleep(0.05)
+        errors = _errors(emu.get_bluetooth_sent())
+        assert len(errors) == 1
+        assert b"unknown system subcommand" in errors[0]
+    finally:
+        emu.stop()
+
+
+def test_runtime_set_time_and_imu(tmp_path):
+    shutil.copy2(PROJECT_LUA, tmp_path / "main.lua")
+    emu = HaloEmulator(sandbox_dir=tmp_path)
+    emu.start("main.lua")
+    try:
+        time.sleep(0.1)
+        # u32 epoch + optional "+HH:MM" zone.
+        emu.inject_bluetooth_data(_message(SET_TIME, bytes((0x65, 0x53, 0x90, 0x00)) + b"+02:00"))
+        time.sleep(0.05)
+        # A short payload reports a device error.
+        emu.inject_bluetooth_data(_message(SET_TIME, b"\x01\x02"))
+        time.sleep(0.05)
+        assert any(b"set_time payload too short" in e for e in _errors(emu.get_bluetooth_sent()))
+
+        emu.set_imu_direction(1.5, -2.0, 0.0)
+        emu.set_imu_raw((12.0, -3.0, 48.0), (1.0, -2.0, 1001.0))
+        emu.inject_bluetooth_data(_message(IMU_READ, b""))
+        time.sleep(0.05)
+        imu_msgs = [m for m in emu.get_bluetooth_sent() if m.startswith(bytes((IMU_CODE,)))]
+        assert imu_msgs, "expected an IMU response"
+        fields = imu_msgs[-1][1:].decode().split(";")
+        assert abs(float(fields[0]) - 1.5) < 0.01
+        assert abs(float(fields[1]) + 2.0) < 0.01
+        assert abs(float(fields[4]) - 48.0) < 0.1
+        assert abs(float(fields[7]) - 1001.0) < 0.1
+    finally:
+        emu.stop()
+
+
+def test_runtime_tap_config(tmp_path):
+    shutil.copy2(PROJECT_LUA, tmp_path / "main.lua")
+    emu = HaloEmulator(sandbox_dir=tmp_path)
+    emu.start("main.lua")
+    try:
+        time.sleep(0.1)
+        # flags=0x01 (mode) + mode index 0 (sensitive); then flags=0x04 + u16 threshold.
+        emu.inject_bluetooth_data(_message(TAP_CONFIG, bytes((0x01, 0x00))))
+        time.sleep(0.05)
+        emu.inject_bluetooth_data(_message(TAP_CONFIG, bytes((0x04, 0x00, 0x0C))))
+        time.sleep(0.05)
+        assert not _errors(emu.get_bluetooth_sent())
+
+        # A bad mode index reports a device error.
+        emu.inject_bluetooth_data(_message(TAP_CONFIG, bytes((0x01, 0x09))))
+        time.sleep(0.05)
+        assert any(b"bad tap mode" in e for e in _errors(emu.get_bluetooth_sent()))
     finally:
         emu.stop()

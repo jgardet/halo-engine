@@ -1,5 +1,6 @@
 package halo.engine.transport
 
+import halo.engine.HaloCommands
 import halo.engine.HaloProtocol
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -21,9 +22,14 @@ class CapabilityStateMachineTest {
         assertEquals(2, events.size)
         val status = events[0] as DeviceEvent.Message
         assertEquals(HaloProtocol.STATUS, status.code)
-        assertEquals("HRP1;primitives,sprites,click,tap,mic,speaker,photo,battery", status.payload.toString(Charsets.UTF_8))
+        val caps = status.payload.toString(Charsets.UTF_8)
+        assertTrue(caps.startsWith("HRP1;"))
+        assertTrue(caps.contains("sound"))
+        assertTrue(caps.contains("imu"))
+        assertTrue(caps.contains("fw="))
+        assertTrue(caps.contains("eui="))
         val text = events[1] as DeviceEvent.Text
-        assertEquals("Halo Engine v2 ready", text.value)
+        assertEquals("Halo Engine v3 ready", text.value)
     }
 
     @Test
@@ -368,5 +374,76 @@ class CapabilityStateMachineTest {
         machine.reset()
         assertFalse(machine.isDisplayActive())
         assertEquals(0, machine.hrpFramesRendered())
+    }
+
+    // ------------------------------------------------------------------ v3 controls
+
+    @Test
+    fun soundPlayRecordsPresetName() {
+        val machine = CapabilityStateMachine()
+        machine.handleMessage(HaloProtocol.SOUND_PLAY, HaloCommands.soundPlay("pickup", volume = 60))
+        assertEquals(listOf("pickup"), machine.soundRequests())
+        assertTrue(messages(machine.drainEvents()).none { it.code == HaloProtocol.ERROR })
+    }
+
+    @Test
+    fun soundPlayUnknownPresetEmitsError() {
+        val machine = CapabilityStateMachine()
+        // flags=0 then a bogus name
+        machine.handleMessage(HaloProtocol.SOUND_PLAY, byteArrayOf(0) + "nonsense".toByteArray())
+        val errors = messages(machine.drainEvents()).filter { it.code == HaloProtocol.ERROR }
+        assertEquals(1, errors.size)
+        assertTrue(errors[0].payload.toString(Charsets.UTF_8).contains("unknown sound preset"))
+    }
+
+    @Test
+    fun systemDisplayPowerSaveToggles() {
+        val machine = CapabilityStateMachine()
+        machine.handleMessage(HaloProtocol.SYSTEM, HaloCommands.systemFlag(HaloProtocol.SYS_DISPLAY_SLEEP, true))
+        // SLEEP takes no arg in the runtime, but the flag form is accepted here.
+        assertTrue(machine.isDisplayPowerSave())
+        machine.handleMessage(HaloProtocol.SYSTEM, HaloCommands.system(HaloProtocol.SYS_DISPLAY_WAKE))
+        assertFalse(machine.isDisplayPowerSave())
+    }
+
+    @Test
+    fun systemCameraPowerSaveFlag() {
+        val machine = CapabilityStateMachine()
+        machine.handleMessage(HaloProtocol.SYSTEM, HaloCommands.systemFlag(HaloProtocol.SYS_CAMERA_POWER_SAVE, true))
+        assertTrue(machine.isCameraPowerSave())
+        machine.handleMessage(HaloProtocol.SYSTEM, HaloCommands.systemFlag(HaloProtocol.SYS_CAMERA_POWER_SAVE, false))
+        assertFalse(machine.isCameraPowerSave())
+    }
+
+    @Test
+    fun systemSleepSubcommandsRecorded() {
+        val machine = CapabilityStateMachine()
+        machine.handleMessage(HaloProtocol.SYSTEM, HaloCommands.system(HaloProtocol.SYS_STANDBY))
+        machine.handleMessage(HaloProtocol.SYSTEM, HaloCommands.systemSeconds(HaloProtocol.SYS_LIGHT_SLEEP, 30))
+        assertEquals(listOf(HaloProtocol.SYS_STANDBY, HaloProtocol.SYS_LIGHT_SLEEP), machine.systemOps())
+    }
+
+    @Test
+    fun setTimeParsesEpochAndZone() {
+        val machine = CapabilityStateMachine()
+        machine.handleMessage(HaloProtocol.SET_TIME, HaloCommands.setTime(1_700_000_000L, "+02:00"))
+        assertEquals(1_700_000_000L to "+02:00", machine.lastTimeSync())
+    }
+
+    @Test
+    fun imuReadEmitsImuPayload() {
+        val machine = CapabilityStateMachine()
+        machine.handleMessage(HaloProtocol.IMU_READ, ByteArray(0))
+        val msgs = messages(machine.drainEvents())
+        assertEquals(HaloProtocol.IMU, msgs[0].code)
+        assertEquals("0.00;0.00;0.0;0.0;0.0;0.0;0.0;1000.0", msgs[0].payload.toString(Charsets.UTF_8))
+    }
+
+    @Test
+    fun tapConfigIsRecorded() {
+        val machine = CapabilityStateMachine()
+        val payload = HaloCommands.tapConfig(mode = "sensitive", threshold = 12)
+        machine.handleMessage(HaloProtocol.TAP_CONFIG, payload)
+        assertContentEquals(payload, machine.lastTapConfig())
     }
 }

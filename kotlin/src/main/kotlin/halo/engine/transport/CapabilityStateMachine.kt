@@ -1,5 +1,6 @@
 package halo.engine.transport
 
+import halo.engine.HaloCommands
 import halo.engine.HaloProtocol
 import java.util.concurrent.ConcurrentLinkedQueue
 
@@ -48,6 +49,12 @@ data class CapabilityConfig(
     val photoData: ByteArray = ByteArray(0),
     /** Photo: chunk size in bytes. */
     val photoChunkSize: Int = 200,
+    /** Firmware version reported in the boot STATUS message. */
+    val firmwareVersion: String = "0.0.0-test",
+    /** Device EUI reported in the boot STATUS message; empty omits it. */
+    val eui: String = "0011223344556677",
+    /** IMU payload returned for `IMU_READ` (pitch;roll;cx;cy;cz;ax;ay;az). */
+    val imuPayload: String = "0.00;0.00;0.0;0.0;0.0;0.0;0.0;1000.0",
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -102,11 +109,23 @@ class CapabilityStateMachine(
     private var displayError: String? = null
     private var hrpFramesRendered = 0
     private var plainTextLines = 0
+    private var displayPowerSave = false
+    private var cameraPowerSave = false
+    private var stayAwake = false
+
+    // Recorded control commands (sound, system, time, tap config)
+    private val soundRequests = mutableListOf<String>()
+    private val systemOps = mutableListOf<Int>()
+    private var lastTimeSync: Pair<Long, String>? = null
+    private var lastTapConfig: ByteArray? = null
 
     /** Boot sequence: emit STATUS with capability string. */
     fun boot() {
-        emit(DeviceEvent.Message(HaloProtocol.STATUS, "HRP1;primitives,sprites,click,tap,mic,speaker,photo,battery".toByteArray()))
-        emit(DeviceEvent.Text("Halo Engine v2 ready"))
+        val caps = "HRP1;primitives,sprites,click,tap,mic,speaker,photo,battery,sound,system,time,imu" +
+            ";fw=" + config.firmwareVersion +
+            if (config.eui.isNotEmpty()) ";eui=" + config.eui else ""
+        emit(DeviceEvent.Message(HaloProtocol.STATUS, caps.toByteArray()))
+        emit(DeviceEvent.Text("Halo Engine v3 ready"))
     }
 
     /**
@@ -150,6 +169,26 @@ class CapabilityStateMachine(
             }
             HaloProtocol.DEVICE_STATUS -> { // BATTERY_CODE in he_runtime.lua is 0x72
                 sendBattery()
+                return true
+            }
+            HaloProtocol.SOUND_PLAY -> {
+                handleSound(payload)
+                return true
+            }
+            HaloProtocol.SYSTEM -> {
+                handleSystem(payload)
+                return true
+            }
+            HaloProtocol.SET_TIME -> {
+                handleSetTime(payload)
+                return true
+            }
+            HaloProtocol.IMU_READ -> {
+                emit(DeviceEvent.Message(HaloProtocol.IMU, config.imuPayload.toByteArray()))
+                return true
+            }
+            HaloProtocol.TAP_CONFIG -> {
+                lastTapConfig = payload.copyOf()
                 return true
             }
             else -> return false
@@ -291,6 +330,69 @@ class CapabilityStateMachine(
         plainTextLines = text.split('\n').count { it.isNotBlank() }
     }
 
+    // ------------------------------------------------------------------ sound / system / time
+
+    /**
+     * Mirrors `he_runtime.lua` `play_sound()`: the name is the remainder of the
+     * payload after the flags byte and optional fields. Unknown presets and
+     * truncated payloads emit an ERROR event.
+     */
+    private fun handleSound(payload: ByteArray) {
+        if (payload.size < 2) {
+            emit(DeviceEvent.Message(HaloProtocol.ERROR, "sound payload too short".toByteArray()))
+            return
+        }
+        val flags = payload[0].toInt()
+        var pos = 1
+        if (flags and 0x01 != 0) pos += 1
+        if (flags and 0x02 != 0) pos += 2
+        if (flags and 0x04 != 0) pos += 2
+        if (pos > payload.size) {
+            emit(DeviceEvent.Message(HaloProtocol.ERROR, "truncated command".toByteArray()))
+            return
+        }
+        val name = String(payload, pos, payload.size - pos, Charsets.UTF_8)
+        if (name !in HaloCommands.SOUND_PRESETS) {
+            emit(DeviceEvent.Message(HaloProtocol.ERROR, "unknown sound preset".toByteArray()))
+            return
+        }
+        soundRequests.add(name)
+    }
+
+    /** Mirrors `he_runtime.lua` `handle_system()` subcommand dispatch. */
+    private fun handleSystem(payload: ByteArray) {
+        if (payload.isEmpty()) {
+            emit(DeviceEvent.Message(HaloProtocol.ERROR, "system payload too short".toByteArray()))
+            return
+        }
+        when (val sub = payload[0].toInt() and 0xFF) {
+            HaloProtocol.SYS_DISPLAY_SLEEP -> displayPowerSave = true
+            HaloProtocol.SYS_DISPLAY_WAKE -> displayPowerSave = false
+            HaloProtocol.SYS_STAY_AWAKE -> stayAwake = payload.getOrElse(1) { 0 }.toInt() != 0
+            HaloProtocol.SYS_CAMERA_POWER_SAVE -> cameraPowerSave = payload.getOrElse(1) { 0 }.toInt() != 0
+            HaloProtocol.SYS_STANDBY,
+            HaloProtocol.SYS_LIGHT_SLEEP,
+            HaloProtocol.SYS_DEEP_SLEEP,
+            HaloProtocol.SYS_SHIP_MODE,
+            HaloProtocol.SYS_CHARGE -> systemOps.add(sub)
+            else -> emit(DeviceEvent.Message(HaloProtocol.ERROR, "unknown system subcommand $sub".toByteArray()))
+        }
+    }
+
+    /** Mirrors `he_runtime.lua` `handle_set_time()`: u32 epoch + optional zone. */
+    private fun handleSetTime(payload: ByteArray) {
+        if (payload.size < 4) {
+            emit(DeviceEvent.Message(HaloProtocol.ERROR, "set_time payload too short".toByteArray()))
+            return
+        }
+        val epoch = ((payload[0].toInt() and 0xFF).toLong() shl 24) or
+            ((payload[1].toInt() and 0xFF).toLong() shl 16) or
+            ((payload[2].toInt() and 0xFF).toLong() shl 8) or
+            (payload[3].toInt() and 0xFF).toLong()
+        val zone = if (payload.size > 4) String(payload, 4, payload.size - 4, Charsets.US_ASCII) else ""
+        lastTimeSync = epoch to zone
+    }
+
     // ------------------------------------------------------------------ battery
 
     private fun sendBattery() {
@@ -325,6 +427,13 @@ class CapabilityStateMachine(
     fun displayError(): String? = displayError
     fun hrpFramesRendered(): Int = hrpFramesRendered
     fun plainTextLines(): Int = plainTextLines
+    fun isDisplayPowerSave(): Boolean = displayPowerSave
+    fun isCameraPowerSave(): Boolean = cameraPowerSave
+    fun isStayAwake(): Boolean = stayAwake
+    fun soundRequests(): List<String> = soundRequests.toList()
+    fun systemOps(): List<Int> = systemOps.toList()
+    fun lastTimeSync(): Pair<Long, String>? = lastTimeSync
+    fun lastTapConfig(): ByteArray? = lastTapConfig?.copyOf()
 
     /** Reset all state (e.g. on disconnect). */
     fun reset() {
@@ -338,6 +447,13 @@ class CapabilityStateMachine(
         displayError = null
         hrpFramesRendered = 0
         plainTextLines = 0
+        displayPowerSave = false
+        cameraPowerSave = false
+        stayAwake = false
+        soundRequests.clear()
+        systemOps.clear()
+        lastTimeSync = null
+        lastTapConfig = null
     }
 
     /** Drain and return all queued events in emission order. */

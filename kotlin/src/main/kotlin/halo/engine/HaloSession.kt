@@ -28,6 +28,13 @@ import kotlin.time.Duration
 class HaloLimitException(message: String) : RuntimeException(message)
 
 /**
+ * Raised when the device reports an application-level failure via an
+ * `ERROR` (0x71) message — e.g. an invalid command or a failed capability
+ * start. The message is the device-supplied reason string.
+ */
+class HaloDeviceException(message: String) : RuntimeException(message)
+
+/**
  * Generic request/response and streaming session over a [HaloBleTransport].
  *
  * This consolidates the chunk-collection logic used by microphone, camera,
@@ -61,9 +68,17 @@ class HaloSession(
         val response = CompletableDeferred<ByteArray>()
         val waiter = async {
             messages
-                .filter { it.code == responseCode }
+                .filter { it.code == responseCode || it.code == HaloProtocol.ERROR }
                 .first()
-                .let { response.complete(it.payload) }
+                .let { message ->
+                    if (message.code == HaloProtocol.ERROR) {
+                        response.completeExceptionally(
+                            HaloDeviceException(message.payload.toString(Charsets.UTF_8)),
+                        )
+                    } else {
+                        response.complete(message.payload)
+                    }
+                }
         }
         val disconnected = connectionEvents?.let {
             async { it.filter { connected -> !connected }.first() }
@@ -121,7 +136,7 @@ class HaloSession(
 
         val collector = async {
             messages
-                .filter { it.code == chunkCode || it.code == finalCode }
+                .filter { it.code == chunkCode || it.code == finalCode || it.code == HaloProtocol.ERROR }
                 .collect { message ->
                     yield()
                     currentCoroutineContext().ensureActive()
@@ -136,6 +151,9 @@ class HaloSession(
                             written += chunk.size
                         }
                         finalCode -> finalSignal.complete(Unit)
+                        HaloProtocol.ERROR -> finalSignal.completeExceptionally(
+                            HaloDeviceException(message.payload.toString(Charsets.UTF_8)),
+                        )
                     }
                 }
         }
@@ -170,7 +188,11 @@ class HaloSession(
             throw cancelled
         } finally {
             stopJob?.cancel()
-            if (stopCode != null && !stopSent.get() && !finalSignal.isCompleted) {
+            // Only skip the stop when the stream ended normally — on a device
+            // ERROR the capability may still be running and must be released.
+            val finishedNormally = finalSignal.isCompleted &&
+                finalSignal.getCompletionExceptionOrNull() == null
+            if (stopCode != null && !stopSent.get() && !finishedNormally) {
                 if (stopSent.compareAndSet(false, true)) {
                     withContext(NonCancellable) { runCatching { send(stopCode, stopPayload) } }
                 }
