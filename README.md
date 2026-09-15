@@ -52,7 +52,9 @@ The same message layer also powers agent-facing device capabilities: microphone 
 - `HaloLimitException` to abort streaming when a per-operation byte ceiling is exceeded.
 - `BluetoothGattChannel` for the Android BLE transport, including bounded in-flight audio write pacing so `WRITE_TYPE_NO_RESPONSE` speaker frames stream without blocking on every callback.
 - `HaloLz4` for LZ4 frame compression. `HaloRuntimeInstaller` uploads `he_runtime.lua` as compressed hex decoded by the stock `frame.compression` API (falling back to escaped-string upload), and sprite assets are LZ4-framed when the runtime advertises the `lz4` capability.
-- `lua/he_runtime.lua` as the device-side dispatcher for microphone, speaker, camera, battery, and input events.
+- `lua/he_runtime.lua` as the device-side dispatcher for display, microphone, speaker, camera, battery, input events, sound presets, power control, clock sync, IMU reads, and tap tuning.
+- `main.lua` autorun — the installer can write a `main.lua` shim so the runtime boots on power-on/reset/wake without host involvement. The runtime answers a host `STATUS` query and advertises `;rt=<version>`, `;wake=<source>`, `fw=`, and `eui=`, letting hosts skip re-upload when a current runtime is already running.
+- Device sprite file cache — `SPRITE_STORE` (0x61) persists a packed asset as `spr_<key>` (acknowledged by `SPRITE_STORED`, 0x73), and HRP opcode 0x10 defines a sprite from a cached key. `HsdHrpCompiler(cacheSprites = true)` derives content-hash keys and reports the assets a caller must ensure-store; `compile_scene_hrp_detailed(cache_sprites=True)` mirrors this in Python. An explicit `cache_key` HSD attribute asserts a pre-stored asset.
 
 These abstractions live in `kotlin/` and `android/` and are consumed by the `dsh-android` agent-senses layer.
 
@@ -167,7 +169,7 @@ The Halo Engine owns the firmware-facing surface for Brilliant Labs Halo:
 
 - **Halo Scene Description (HSD)** — JSON scene graph, validation, coordinate conversion, colors, fonts, sprite packing.
 - **Halo Render Protocol (HRP)** — compact binary display protocol carried inside official BLE data-message framing.
-- **Lua runtime** — `lua/he_runtime.lua` device-side dispatcher for display, microphone, speaker, camera, battery, and input events.
+- **Lua runtime** — `lua/he_runtime.lua` device-side dispatcher for display, sprite file cache, microphone, speaker, camera, battery, and input events, plus the `main.lua` autorun install path.
 - **BLE transport** — `BluetoothGattChannel`, `AndroidBleTransport`, message framing, MTU negotiation, receiver-paced audio writes.
 - **Streaming primitives** — `HaloMessage`, `HaloSession` for request/response and chunk-based streaming with cancellation and bounded collection.
 - **Python and Kotlin vectors** — equivalent HSD/HRP compilation, emulator validation, and MCP integration.

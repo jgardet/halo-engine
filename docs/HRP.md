@@ -36,8 +36,25 @@ All integers are unsigned big-endian unless stated otherwise. Coordinates use th
 | `0x0D` | `x:u16 y:u16 w:u16 h:u16` | Begin dirty region (optimization hint) |
 | `0x0E` | none | End frame |
 | `0x0F` | `client_features:u32` | Capability/feature handshake |
+| `0x10` | `id:u16 key_len:u8 key:utf8[key_len]` | Define sprite resource from the device file cache (`spr_<key>`); errors the frame on cache miss |
 
 Payload lengths are derived from the opcode and fixed/variable fields. Unknown opcodes are rejected for the frame; malformed lengths reject the frame without drawing it.
+
+## Sprite file cache
+
+The runtime persists packed sprite assets as `spr_<key>` files (hex-encoded,
+bounded at 32 entries) so repeat presentations can reference them with opcode
+`0x10` instead of carrying the pixels. Two outer message codes support this:
+
+| Code | Direction | Payload | Meaning |
+|---:|---|---|---|
+| `0x61` | host→dev | `key_len:u8 key:utf8[key_len] asset[remaining]` | `SPRITE_STORE` — persist the packed asset under `spr_<key>`; idempotent |
+| `0x73` | dev→host | `key:utf8` | `SPRITE_STORED` — acknowledge a successful store |
+
+Keys must match `[A-Za-z0-9_-]{1,64}`. A failed store or a cached-define miss
+reports a device `ERROR` (0x71); hosts should ensure-store before sending a
+frame that references a key, and fall back to opcode `0x0A` when the runtime
+does not advertise the `spritecache` capability.
 
 ## Compatibility modes
 
