@@ -223,3 +223,26 @@ def test_runtime_compressed_sprite(tmp_path):
         assert any(b"sprite decompress failed" in e for e in _errors(emu.get_bluetooth_sent()))
     finally:
         emu.stop()
+
+
+def test_runtime_status_query_replies_with_caps(tmp_path):
+    """A host STATUS query must answer with the capability string so the
+    connect probe can detect an already-running (autorun) runtime."""
+    shutil.copy2(PROJECT_LUA, tmp_path / "main.lua")
+    emu = HaloEmulator(sandbox_dir=tmp_path)
+    emu.start("main.lua")
+    try:
+        time.sleep(0.1)
+        boot = [m for m in emu.get_bluetooth_sent() if m.startswith(b"\x70HRP1;")]
+        assert len(boot) == 1
+        assert b";rt=" in boot[0]
+        assert b";wake=" in boot[0]
+
+        before = len(emu.get_bluetooth_sent())
+        emu.inject_bluetooth_data(_message(0x70, b""))
+        time.sleep(0.1)
+        replies = [m for m in emu.get_bluetooth_sent()[before:] if m.startswith(b"\x70HRP1;")]
+        assert len(replies) == 1
+        assert b";rt=" in replies[0]
+    finally:
+        emu.stop()

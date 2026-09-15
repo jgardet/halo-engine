@@ -29,13 +29,28 @@ class HaloRuntimeInstaller(
      * structured runtime source (e.g. [halo.engine.android.AssetHaloRuntimeSource])
      * rather than a raw string.
      */
-    suspend fun installAndStart(source: HaloRuntimeSource, timeoutMs: Long = 10_000): String =
-        installAndStart(source.load(), timeoutMs)
+    suspend fun installAndStart(
+        source: HaloRuntimeSource,
+        timeoutMs: Long = 10_000,
+        autorun: Boolean = false,
+    ): String = installAndStart(source.load(), timeoutMs, autorun)
 
-    suspend fun installAndStart(source: String, timeoutMs: Long = 10_000): String = coroutineScope {
+    /**
+     * @param autorun when true, also writes a `main.lua` shim that boots the
+     *   runtime (`require('<module>')`) on every power-on/reset/light-sleep
+     *   wake, so the glasses come up running without a host install. Hosts
+     *   detect the already-running runtime via a STATUS query instead of
+     *   re-installing (see `PhysicalHaloEndpoint`'s runtime probe).
+     */
+    suspend fun installAndStart(
+        source: String,
+        timeoutMs: Long = 10_000,
+        autorun: Boolean = false,
+    ): String = coroutineScope {
         transport.sendControl(HaloProtocol.LUA_CTRL_INTERRUPT.toByte())
         delay(200)
         upload(source)
+        if (autorun) writeAutorun()
         val ready = async(start = CoroutineStart.UNDISPATCHED) {
             withTimeout(timeoutMs) {
                 transport.notifications.filterIsInstance<HaloNotification.Message>()
@@ -46,6 +61,26 @@ class HaloRuntimeInstaller(
         val module = runtimeFileName.removeSuffix(".lua")
         transport.sendLua("package.loaded['$module']=nil require('$module')")
         ready.await()
+    }
+
+    /**
+     * Remove `main.lua` and reset the Lua VM (firmware CTRL+E). After this
+     * the glasses boot to a bare REPL until a runtime is installed again.
+     */
+    suspend fun removeAutorun() {
+        transport.sendControl(HaloProtocol.LUA_CTRL_RESET.toByte())
+    }
+
+    private suspend fun writeAutorun() {
+        val module = runtimeFileName.removeSuffix(".lua")
+        val ack = "frame.bluetooth.send(string.char(${HaloProtocol.STATUS}) .. 'ok')"
+        transport.sendLuaAwaitStatus(
+            "f=frame.file.open('$AUTORUN_FILE_NAME','w');" +
+                "f:write([[local ok,err=pcall(require,'$module') " +
+                "if not ok then print('autorun failed: '..tostring(err)) end]]);" +
+                "f:close();$ack",
+            expectedPayload = "ok",
+        )
     }
 
     private suspend fun upload(source: String) {
@@ -120,6 +155,10 @@ class HaloRuntimeInstaller(
             transport.sendLuaAwaitStatus("f:write(\"$chunk\");$ack", expectedPayload = "ok")
         }
         transport.sendLuaAwaitStatus("f:close();$ack", expectedPayload = "ok")
+    }
+
+    private companion object {
+        const val AUTORUN_FILE_NAME = "main.lua"
     }
 
     private fun utf8Chunks(value: String, maxBytes: Int): List<String> {

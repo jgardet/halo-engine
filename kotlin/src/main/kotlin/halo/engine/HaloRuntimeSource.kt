@@ -22,7 +22,19 @@ fun interface HaloRuntimeSource {
      */
     fun load(): String
 
-    companion object
+    companion object {
+        private val VERSION_PATTERN =
+            Regex("""RUNTIME_VERSION\s*=\s*['"]([^'"]+)['"]""")
+
+        /**
+         * Parse the `RUNTIME_VERSION` constant embedded in runtime source
+         * text, or null when the source does not declare one. The runtime
+         * advertises it as `;rt=<version>` in STATUS, letting hosts skip a
+         * re-upload when the already-running (autorun) runtime is current.
+         */
+        fun versionOf(source: String): String? =
+            VERSION_PATTERN.find(source)?.groupValues?.get(1)
+    }
 }
 
 /** Thrown when [HaloRuntimeSource.load] fails. */

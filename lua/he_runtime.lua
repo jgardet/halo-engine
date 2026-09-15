@@ -28,6 +28,10 @@ local STATUS_CODE = 0x70
 local ERROR_CODE = 0x71
 local MAX_DATA_BYTES = 32768
 
+-- Bumped on every runtime change; advertised in STATUS as ;rt=<version> so
+-- hosts can skip re-upload when the autorunning runtime is already current.
+local RUNTIME_VERSION = '3.1'
+
 local QUALITIES = { 'VERY_LOW', 'LOW', 'MEDIUM', 'HIGH', 'VERY_HIGH' }
 local SOUND_PRESETS = { pickup = true, laser = true, explosion = true,
     powerup = true, hit = true, jump = true, blip = true }
@@ -548,6 +552,25 @@ local function reset_mpix_pipeline()
     mpixCustom = false
 end
 
+-- Capability announcement, sent at boot and in reply to a host STATUS query.
+-- A query lets the host detect an already-running runtime (main.lua autorun)
+-- whose boot STATUS went out before the BLE host connected.
+local function send_status()
+    local fw_version = 'unknown'
+    pcall(function() fw_version = tostring(frame.FIRMWARE_VERSION or 'unknown') end)
+    local eui_suffix = ''
+    pcall(function() eui_suffix = ';eui=' .. tostring(frame.get_eui()) end)
+    local wake_suffix = ''
+    pcall(function() wake_suffix = ';wake=' .. tostring(frame.wakeup_source()) end)
+    local mpix_suffix = ''
+    pcall(function() if mpix_available() then mpix_suffix = ';mpix' end end)
+    local lz4_suffix = ''
+    pcall(function() if frame.compression ~= nil then lz4_suffix = ',lz4' end end)
+    send_event(STATUS_CODE, 'HRP1;primitives,sprites,click,tap,mic,speaker,photo,battery,sound,system,time,imu'
+        .. mpix_suffix .. lz4_suffix
+        .. ';fw=' .. fw_version .. ';rt=' .. RUNTIME_VERSION .. eui_suffix .. wake_suffix)
+end
+
 -- Message dispatch.
 local function handle_message(code, payload)
     if code == HRP_CODE then
@@ -690,6 +713,8 @@ local function handle_message(code, payload)
     elseif code == TAP_CONFIG then
         local ok, err = pcall(handle_tap_config, payload)
         if not ok then send_event(ERROR_CODE, tostring(err)) end
+    elseif code == STATUS_CODE then
+        pcall(send_status)
     else
         -- ignore unknown
     end
@@ -704,16 +729,8 @@ frame.imu.tap_callback(function(kind)
     send_event(TAP_CODE, string.char(codes[kind] or 1))
 end)
 frame.display.power_save(false)
-local fw_version = 'unknown'
-pcall(function() fw_version = tostring(frame.FIRMWARE_VERSION or 'unknown') end)
-local eui_suffix = ''
-pcall(function() eui_suffix = ';eui=' .. tostring(frame.get_eui()) end)
-local mpix_suffix = ''
-pcall(function() if mpix_available() then mpix_suffix = ';mpix' end end)
-local lz4_suffix = ''
-pcall(function() if frame.compression ~= nil then lz4_suffix = ',lz4' end end)
-send_event(STATUS_CODE, 'HRP1;primitives,sprites,click,tap,mic,speaker,photo,battery,sound,system,time,imu' .. mpix_suffix .. lz4_suffix .. ';fw=' .. fw_version .. eui_suffix)
-print('Halo Engine v3 ready')
+send_status()
+print('Halo Engine v' .. RUNTIME_VERSION .. ' ready')
 
 while true do
     local ok, err = pcall(function()
