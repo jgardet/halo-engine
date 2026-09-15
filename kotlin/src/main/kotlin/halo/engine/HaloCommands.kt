@@ -30,6 +30,20 @@ object HaloCommands {
     /** `CLEAR_DISPLAY` (0x10): no payload. */
     fun clearDisplay(): ByteArray = byteArrayOf()
 
+    /**
+     * `SPRITE_STORE` (0x61): `[key_len u8][key utf8][packed sprite asset]`.
+     * The runtime persists the asset as `spr_<key>` so later HRP frames can
+     * reference it with the cached-define opcode (0x10) instead of carrying
+     * the pixels again. Keys are filename-safe: `[A-Za-z0-9_-]{1,64}`.
+     */
+    fun spriteStore(key: String, asset: ByteArray): ByteArray {
+        val keyBytes = key.toByteArray(Charsets.UTF_8)
+        require(key.matches(Regex("[A-Za-z0-9_-]{1,64}"))) {
+            "sprite cache key must match [A-Za-z0-9_-]{1,64}"
+        }
+        return byteArrayOf(keyBytes.size.toByte()) + keyBytes + asset
+    }
+
     /** `PLAIN_TEXT` (0x11): UTF-8 text drawn line by line on the display. */
     fun plainText(text: String): ByteArray = text.toByteArray(Charsets.UTF_8)
 

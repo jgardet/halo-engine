@@ -111,6 +111,11 @@ class HsdValidator(
                     require(obj.int("palette_offset", 0) in 0..15) { "Sprite palette_offset must be 0..15" }
                     require(obj.int("scale_x", 1) == 1 && obj.int("scale_y", 1) == 1) { "runtime/HRP sprites do not support scaling (use 1 or switch to repl mode)" }
                     require(obj.int("resource_id", 1) in 1..0xFFFF) { "Sprite resource_id must be 1..65535" }
+                    obj["cache_key"]?.let {
+                        require(it.jsonPrimitive.content.matches(Regex("[A-Za-z0-9_-]{1,64}"))) {
+                            "Sprite cache_key must match [A-Za-z0-9_-]{1,64}"
+                        }
+                    }
                 }
                 else -> fail("Unknown HSD element type: $type")
             }

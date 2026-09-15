@@ -26,6 +26,12 @@ import halo.engine.validateHrpMessage
 class HrpRenderer(
     private val buffer: DisplayBuffer = DisplayBuffer(),
     private val limits: HaloLimits = StockHaloLimits,
+    /**
+     * Device-side sprite cache contents (`spr_<key>` files written by
+     * `SPRITE_STORE`), shared with the endpoint/transport so cached-define
+     * commands (opcode 0x10) resolve the same way the firmware runtime does.
+     */
+    private val spriteFiles: MutableMap<String, ByteArray> = mutableMapOf(),
 ) {
     private val sprites = mutableMapOf<Int, SpriteAsset>()
 
@@ -96,6 +102,7 @@ class HrpRenderer(
             0x0D -> { /* dirty-region hint; no-op */ }
             0x0E -> { /* end frame / show; no-op on Halo */ }
             0x0F -> { /* feature negotiation; no-op */ }
+            0x10 -> cmdSpriteDefineCached(payload, cmdIndex, cmdOffset)
             else -> throw HrpFailure.Command(HrpFailure.Category.UNSUPPORTED_OPCODE, cmdOffset, cmdIndex, opcode,
                 "unsupported HRP opcode: 0x${opcode.toString(16)}")
         }
@@ -273,6 +280,24 @@ class HrpRenderer(
             sprite.pixelData,
             customPalette = sprite.palette.takeIf { it.isNotEmpty() },
         )
+    }
+
+    private fun cmdSpriteDefineCached(payload: ByteArray, cmdIndex: Int, cmdOffset: Int) {
+        if (payload.size < 3) {
+            throw HrpFailure.Command(HrpFailure.Category.PAYLOAD_SIZE, cmdOffset, cmdIndex, 0x10,
+                "spriteDefineCached expects at least 3 bytes, got ${payload.size}")
+        }
+        val id = u16(payload, 0)
+        val keyLen = payload[2].toInt() and 0xFF
+        if (payload.size != 3 + keyLen) {
+            throw HrpFailure.Command(HrpFailure.Category.PAYLOAD_SIZE, cmdOffset, cmdIndex, 0x10,
+                "spriteDefineCached key field truncated: len=$keyLen, payload=${payload.size}")
+        }
+        val key = String(payload, 3, keyLen, Charsets.UTF_8)
+        val asset = spriteFiles[key] ?: throw HrpFailure.Command(
+            HrpFailure.Category.MISSING_RESOURCE, cmdOffset, cmdIndex, 0x10,
+            "sprite cache miss: $key")
+        cmdSpriteDefine(byteArrayOf((id ushr 8).toByte(), id.toByte()) + asset, cmdIndex, cmdOffset)
     }
 
     private fun cmdSpriteRelease(payload: ByteArray, cmdIndex: Int, cmdOffset: Int) {

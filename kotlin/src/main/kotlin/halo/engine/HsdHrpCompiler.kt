@@ -1,9 +1,11 @@
 package halo.engine
 
+import java.security.MessageDigest
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
@@ -15,27 +17,44 @@ class HsdHrpCompiler(
     private val limits: HaloLimits = StockHaloLimits,
     private val validator: HsdValidator = HsdValidator(limits),
     private val lz4Sprites: Boolean = false,
+    /**
+     * When true, every sprite emits a cached define (opcode 0x10) keyed by a
+     * content hash of its packed asset, and [CompiledHsd.spriteAssets] carries
+     * the key→asset pairs the caller must persist on-device via `SPRITE_STORE`
+     * before sending the frame. An explicit `cache_key` attribute overrides
+     * the derived key while still returning the asset for ensure-store.
+     */
+    private val cacheSprites: Boolean = false,
 ) {
-    fun compile(document: JsonElement): ByteArray {
+    /** Compiled scene plus the sprite assets its cached defines depend on. */
+    data class CompiledHsd(
+        val frame: ByteArray,
+        val spriteAssets: Map<String, ByteArray>,
+    )
+
+    fun compile(document: JsonElement): ByteArray = compileDetailed(document).frame
+
+    fun compileDetailed(document: JsonElement): CompiledHsd {
         validator.validate(document)
         val root = document.jsonObject["scene"]!!.jsonObject
         val builder = HrpBuilder(limits.maxHrpMessageBytes)
         val sprites = SpriteRegistry()
+        val spriteAssets = linkedMapOf<String, ByteArray>()
         builder.clear(root["bg"] ?: "#000000")
         root["brightness"]?.jsonPrimitive?.intOrNull?.let(builder::brightness)
-        root["children"]?.jsonArray?.forEach { compileElement(it.jsonObject, builder, 0, 0, sprites) }
+        root["children"]?.jsonArray?.forEach { compileElement(it.jsonObject, builder, 0, 0, sprites, spriteAssets) }
         val payload = builder.endFrame().build()
         validateHrpMessage(payload, limits)
-        return payload
+        return CompiledHsd(payload, spriteAssets)
     }
 
-    private fun compileElement(element: JsonObject, builder: HrpBuilder, dx: Int, dy: Int, sprites: SpriteRegistry) {
+    private fun compileElement(element: JsonObject, builder: HrpBuilder, dx: Int, dy: Int, sprites: SpriteRegistry, spriteAssets: MutableMap<String, ByteArray>) {
         if (element["visible"]?.jsonPrimitive?.booleanOrNull == false) return
         when (element.string("type")) {
             "group" -> {
                 val x = dx + element.int("x", 0)
                 val y = dy + element.int("y", 0)
-                element.children().forEach { compileElement(it.jsonObject, builder, x, y, sprites) }
+                element.children().forEach { compileElement(it.jsonObject, builder, x, y, sprites, spriteAssets) }
             }
             "row" -> {
                 var x = dx + element.int("x", 0)
@@ -43,7 +62,7 @@ class HsdHrpCompiler(
                 val spacing = element.int("spacing", 0)
                 element.children().forEach {
                     val child = it.jsonObject
-                    compileElement(child, builder, x, y, sprites)
+                    compileElement(child, builder, x, y, sprites, spriteAssets)
                     x += HsdLayout.estimateWidth(child) + spacing
                 }
             }
@@ -53,7 +72,7 @@ class HsdHrpCompiler(
                 val spacing = element.int("spacing", 0)
                 element.children().forEach {
                     val child = it.jsonObject
-                    compileElement(child, builder, x, y, sprites)
+                    compileElement(child, builder, x, y, sprites, spriteAssets)
                     y += HsdLayout.estimateHeight(child) + spacing
                 }
             }
@@ -97,17 +116,21 @@ class HsdHrpCompiler(
             )
             "sprite" -> {
                 val src = element.string("src")
+                val cacheKey = element["cache_key"]?.jsonPrimitive?.contentOrNull
                 val (id, isNew) = sprites.assign(src, element["resource_id"]?.jsonPrimitive?.intOrNull)
                 if (isNew) {
-                    val sprite = packer.pack(
-                        src,
-                        element["w"]?.jsonPrimitive?.intOrNull,
-                        element["h"]?.jsonPrimitive?.intOrNull,
-                        element.int("bpp", 4),
-                    )
-                    val packed = HaloHost.packSpriteAsset(sprite, compress = lz4Sprites)
-                    require(packed.size <= limits.maxAssetBytes) { "Sprite exceeds conservative stock asset budget" }
-                    builder.spriteDefine(id, packed)
+                    if (cacheKey != null && !cacheSprites) {
+                        // Caller asserts `spr_<cache_key>` is already stored
+                        // on-device; emit a cached define and skip packing.
+                        builder.spriteDefineCached(id, cacheKey)
+                    } else if (cacheSprites || cacheKey != null) {
+                        val packed = packSprite(element, src)
+                        val key = cacheKey ?: spriteCacheKey(packed)
+                        builder.spriteDefineCached(id, key)
+                        spriteAssets[key] = packed
+                    } else {
+                        builder.spriteDefine(id, packSprite(element, src))
+                    }
                 }
                 builder.spriteDraw(id, element.int("x") + dx, element.int("y") + dy, element.int("palette_offset", 0))
             }
@@ -146,6 +169,24 @@ class HsdHrpCompiler(
             srcToId[src] = id
             return id to true
         }
+    }
+
+    private fun packSprite(element: JsonObject, src: String): ByteArray {
+        val sprite = packer.pack(
+            src,
+            element["w"]?.jsonPrimitive?.intOrNull,
+            element["h"]?.jsonPrimitive?.intOrNull,
+            element.int("bpp", 4),
+        )
+        val packed = HaloHost.packSpriteAsset(sprite, compress = lz4Sprites)
+        require(packed.size <= limits.maxAssetBytes) { "Sprite exceeds conservative stock asset budget" }
+        return packed
+    }
+
+    /** Device cache key derived from the packed asset bytes (content hash). */
+    private fun spriteCacheKey(asset: ByteArray): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(asset)
+        return "s" + digest.copyOfRange(0, 16).joinToString("") { "%02x".format(it) }
     }
 
     private fun JsonObject.children(): JsonArray = this["children"]!!.jsonArray

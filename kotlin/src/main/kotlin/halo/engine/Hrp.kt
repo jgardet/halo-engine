@@ -60,6 +60,16 @@ class HrpBuilder(private val maxBytes: Int = 32768) {
         return add(0x0B, u16(id) + u16(x) + u16(y) + byteArrayOf(offset.toByte()))
     }
     fun spriteRelease(id: Int): HrpBuilder = add(0x0C, u16(id))
+    /**
+     * Define sprite [id] from a device-cached asset (`spr_<key>` written by a
+     * prior `SPRITE_STORE` message). Emits opcode 0x10 — keeps the HRP frame
+     * small when the same sprite is presented repeatedly.
+     */
+    fun spriteDefineCached(id: Int, key: String): HrpBuilder {
+        val keyBytes = key.toByteArray(Charsets.UTF_8)
+        require(keyBytes.size in 1..64) { "sprite cache key must be 1..64 bytes" }
+        return add(0x10, u16(id) + byteArrayOf(keyBytes.size.toByte()) + keyBytes)
+    }
     fun dirtyRegion(x: Int, y: Int, w: Int, h: Int): HrpBuilder = add(0x0D, u16(x) + u16(y) + u16(w) + u16(h))
     fun endFrame(): HrpBuilder = add(0x0E, byteArrayOf())
     fun features(value: Long): HrpBuilder {

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+import hashlib
 import zlib
 
 from .compiler import _estimated_height, _estimated_width
@@ -12,21 +13,39 @@ from .limits import STOCK_HALO, validate_asset_size
 from .sprite import pack_sprite
 
 
-def compile_scene_hrp(scene: dict[str, Any], max_bytes: int = STOCK_HALO.max_hrp_message_bytes, lz4_sprites: bool = False) -> bytes:
+def compile_scene_hrp(scene: dict[str, Any], max_bytes: int = STOCK_HALO.max_hrp_message_bytes, lz4_sprites: bool = False, cache_sprites: bool = False) -> bytes:
+    return compile_scene_hrp_detailed(scene, max_bytes, lz4_sprites, cache_sprites)[0]
+
+
+def compile_scene_hrp_detailed(
+    scene: dict[str, Any],
+    max_bytes: int = STOCK_HALO.max_hrp_message_bytes,
+    lz4_sprites: bool = False,
+    cache_sprites: bool = False,
+) -> tuple[bytes, dict[str, bytes]]:
+    """Compile to an HRP frame plus the sprite assets its cached defines need.
+
+    When `cache_sprites` is set, every sprite emits a cached define (opcode
+    0x10) keyed by a content hash of its packed asset; the returned
+    key→asset map must be persisted on-device via SPRITE_STORE before the
+    frame is sent. An explicit `cache_key` element attribute overrides the
+    derived key while still returning the asset for ensure-store.
+    """
     HsdValidator().validate(scene)
     root = scene.get("scene", {})
     builder = HrpBuilder(max_bytes=max_bytes)
     defined: set[int] = set()
+    sprite_assets: dict[str, bytes] = {}
     builder.clear(root.get("bg", "#000000"))
     if root.get("brightness") is not None:
         builder.brightness(int(root["brightness"]))
     for child in root.get("children", []):
-        _element(child, builder, 0, 0, defined, lz4_sprites)
+        _element(child, builder, 0, 0, defined, lz4_sprites, cache_sprites, sprite_assets)
     builder.end_frame()
-    return builder.build()
+    return builder.build(), sprite_assets
 
 
-def _element(el: dict[str, Any], b: HrpBuilder, dx: int, dy: int, defined: set[int], lz4_sprites: bool) -> None:
+def _element(el: dict[str, Any], b: HrpBuilder, dx: int, dy: int, defined: set[int], lz4_sprites: bool, cache_sprites: bool, sprite_assets: dict[str, bytes]) -> None:
     if not el.get("visible", True):
         return
     typ = el.get("type", "").lower()
@@ -36,13 +55,13 @@ def _element(el: dict[str, Any], b: HrpBuilder, dx: int, dy: int, defined: set[i
         spacing = int(el.get("spacing", 0))
         for child in el.get("children", []):
             if typ == "row":
-                _element(child, b, current, oy, defined, lz4_sprites)
+                _element(child, b, current, oy, defined, lz4_sprites, cache_sprites, sprite_assets)
                 current += _estimated_width(child) + spacing
             elif typ == "column":
-                _element(child, b, ox, current, defined, lz4_sprites)
+                _element(child, b, ox, current, defined, lz4_sprites, cache_sprites, sprite_assets)
                 current += _estimated_height(child) + spacing
             else:
-                _element(child, b, ox, oy, defined, lz4_sprites)
+                _element(child, b, ox, oy, defined, lz4_sprites, cache_sprites, sprite_assets)
         return
 
     color = el.get("color", "#FFFFFF")
@@ -62,12 +81,24 @@ def _element(el: dict[str, Any], b: HrpBuilder, dx: int, dy: int, defined: set[i
     elif typ == "sprite":
         if int(el.get("scale_x", 1)) != 1 or int(el.get("scale_y", 1)) != 1:
             raise ValueError("HRP sprites do not support scaling")
-        asset = pack_sprite(str(el["src"]), el.get("w"), el.get("h"), int(el.get("bpp", 4)))
-        packed = asset.packed(compress=lz4_sprites)
-        validate_asset_size(packed.__len__())
+        cache_key = el.get("cache_key")
         sprite_id = int(el.get("resource_id", 1 + zlib.crc32(str(el["src"]).encode()) % 65534))
         if sprite_id not in defined:
-            b.sprite_define(sprite_id, packed)
+            if cache_key is not None and not cache_sprites:
+                # Caller asserts `spr_<cache_key>` is already stored on-device.
+                b.sprite_define_cached(sprite_id, str(cache_key))
+            elif cache_sprites or cache_key is not None:
+                asset = pack_sprite(str(el["src"]), el.get("w"), el.get("h"), int(el.get("bpp", 4)))
+                packed = asset.packed(compress=lz4_sprites)
+                validate_asset_size(packed.__len__())
+                key = str(cache_key) if cache_key is not None else "s" + hashlib.sha256(packed).hexdigest()[:32]
+                b.sprite_define_cached(sprite_id, key)
+                sprite_assets[key] = packed
+            else:
+                asset = pack_sprite(str(el["src"]), el.get("w"), el.get("h"), int(el.get("bpp", 4)))
+                packed = asset.packed(compress=lz4_sprites)
+                validate_asset_size(packed.__len__())
+                b.sprite_define(sprite_id, packed)
             defined.add(sprite_id)
         b.sprite_draw(sprite_id, int(el.get("x", 0)) + dx, int(el.get("y", 0)) + dy, int(el.get("palette_offset", 0)))
     else:

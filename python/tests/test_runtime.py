@@ -26,6 +26,8 @@ SET_TIME = 0x52
 IMU_READ = 0x53
 TAP_CONFIG = 0x54
 ERROR_CODE = 0x71
+SPRITE_STORE = 0x61
+SPRITE_STORED = 0x73
 
 
 def test_runtime_executes_hrp(tmp_path):
@@ -221,6 +223,49 @@ def test_runtime_compressed_sprite(tmp_path):
         emu.inject_bluetooth_data(_message(HRP_CODE, _hrp((0x0A, bad))))
         time.sleep(0.1)
         assert any(b"sprite decompress failed" in e for e in _errors(emu.get_bluetooth_sent()))
+    finally:
+        emu.stop()
+
+
+def test_runtime_sprite_cache(tmp_path):
+    """SPRITE_STORE persists a packed asset under spr_<key>; the cached
+    define opcode (0x10) resolves it without carrying the pixels."""
+    from halo_engine.hrp import sprite_store_payload
+
+    shutil.copy2(PROJECT_LUA, tmp_path / "main.lua")
+    emu = HaloEmulator(sandbox_dir=tmp_path)
+    emu.start("main.lua")
+    try:
+        time.sleep(0.1)
+        sent = emu.get_bluetooth_sent()
+        assert any(b"spritecache" in item for item in sent)
+
+        # 8x8, 1bpp, all pixels index 1 (white) — uncompressed.
+        asset = (
+            bytes((0, 8, 0, 8, 0, 1, 2))
+            + bytes((0, 0, 0, 255, 255, 255))
+            + b"\xFF" * 8
+        )
+        key = "testkey1"
+        emu.inject_bluetooth_data(_message(SPRITE_STORE, sprite_store_payload(key, asset)))
+        time.sleep(0.1)
+        acks = [m for m in emu.get_bluetooth_sent() if m.startswith(bytes((SPRITE_STORED,)))]
+        assert acks and acks[-1][1:] == key.encode()
+        assert (tmp_path / f"spr_{key}").exists()
+
+        # Cached define + draw renders without re-sending the pixels.
+        cached = bytes((0, 5)) + bytes((len(key),)) + key.encode()
+        draw = bytes((0, 5, 0, 20, 0, 20, 0))
+        emu.inject_bluetooth_data(_message(HRP_CODE, _hrp((0x10, cached), (0x0B, draw))))
+        time.sleep(0.1)
+        assert not _errors(emu.get_bluetooth_sent())
+        assert emu.get_framebuffer().getpixel((20, 20))[:3] == (255, 255, 255)
+
+        # A cache miss reports a device error instead of drawing.
+        miss = bytes((0, 6)) + bytes((4,)) + b"nope"
+        emu.inject_bluetooth_data(_message(HRP_CODE, _hrp((0x10, miss))))
+        time.sleep(0.1)
+        assert any(b"cache miss" in e for e in _errors(emu.get_bluetooth_sent()))
     finally:
         emu.stop()
 

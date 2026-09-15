@@ -1,5 +1,6 @@
 package halo.engine.display
 
+import halo.engine.HaloHost
 import halo.engine.HrpBuilder
 import halo.engine.HsdHrpCompiler
 import halo.engine.SpritePacker
@@ -166,5 +167,30 @@ class HrpRendererTest {
         // HRP coords are 0-indexed; renderer adds 1 → DisplayBuffer(129, 4) → pixel (128, 3)
         val circlePixel = px[3 * 256 + 128]
         assertTrue(circlePixel != 0xFF000000.toInt(), "circle outline should be visible at (128,3)")
+    }
+
+    @Test
+    fun cachedSpriteDefineResolvesStoredAsset() {
+        // 2x2 1bpp, all pixels palette index 1 (white).
+        val sprite = SpritePacker.Sprite(
+            width = 2, height = 2, bpp = 1, numColors = 2,
+            paletteData = byteArrayOf(0, 0, 0, -1, -1, -1),
+            pixelData = byteArrayOf(1, 1, 1, 1),
+        )
+        val files = mutableMapOf("icon" to HaloHost.packSpriteAsset(sprite))
+        val renderer = HrpRenderer(spriteFiles = files)
+
+        val hrp = HrpBuilder().spriteDefineCached(3, "icon").spriteDraw(3, 10, 10).build()
+        renderer.render(hrp)
+        val px = renderer.snapshot()
+        assertEquals(0xFFFFFFFF.toInt(), px[10 * 256 + 10], "cached sprite should draw at (10,10)")
+    }
+
+    @Test
+    fun cachedSpriteDefineMissFails() {
+        val renderer = HrpRenderer(spriteFiles = mutableMapOf())
+        val hrp = HrpBuilder().spriteDefineCached(3, "absent").build()
+        val failure = assertFailsWith<HrpFailure> { renderer.render(hrp) }
+        assertEquals(HrpFailure.Category.MISSING_RESOURCE, failure.category)
     }
 }

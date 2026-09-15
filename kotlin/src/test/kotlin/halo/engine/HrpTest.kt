@@ -40,4 +40,22 @@ class HrpTest {
         )
         assertContentEquals(expected, actual)
     }
+
+    @Test
+    fun spriteDefineCachedUsesTheDocumentedLayout() {
+        val actual = HrpBuilder().spriteDefineCached(7, "icon_nav").build()
+        val key = "icon_nav".toByteArray(Charsets.US_ASCII)
+        val expected = byteArrayOf(
+            'H'.code.toByte(), 'R'.code.toByte(), 'P'.code.toByte(), '1'.code.toByte(), 0,
+            0, 1,
+            0x10, 0, 11, 0, 7, key.size.toByte(),
+        ) + key
+        assertContentEquals(expected, actual)
+    }
+
+    @Test
+    fun spriteDefineCachedRejectsBadKeys() {
+        assertFailsWith<IllegalArgumentException> { HrpBuilder().spriteDefineCached(1, "") }
+        assertFailsWith<IllegalArgumentException> { HrpBuilder().spriteDefineCached(1, "k".repeat(65)) }
+    }
 }

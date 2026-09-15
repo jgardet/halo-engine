@@ -3,6 +3,7 @@ package halo.engine
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 
 class HaloCommandsTest {
 
@@ -53,6 +54,22 @@ class HaloCommandsTest {
         )
         // conv3x3 sharpen: 0x05, 3
         assertContentEquals(byteArrayOf(0x05, 3), payload.copyOfRange(16, 18))
+    }
+
+    @Test
+    fun spriteStoreEncodesKeyThenAsset() {
+        val payload = HaloCommands.spriteStore("icon_nav", byteArrayOf(1, 2, 3))
+        assertContentEquals(
+            byteArrayOf(8) + "icon_nav".toByteArray() + byteArrayOf(1, 2, 3),
+            payload,
+        )
+    }
+
+    @Test
+    fun spriteStoreRejectsUnsafeKeys() {
+        assertFailsWith<IllegalArgumentException> { HaloCommands.spriteStore("../escape", byteArrayOf(1)) }
+        assertFailsWith<IllegalArgumentException> { HaloCommands.spriteStore("", byteArrayOf(1)) }
+        assertFailsWith<IllegalArgumentException> { HaloCommands.spriteStore("k".repeat(65), byteArrayOf(1)) }
     }
 
     @Test

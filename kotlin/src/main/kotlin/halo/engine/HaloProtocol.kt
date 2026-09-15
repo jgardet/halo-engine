@@ -43,9 +43,13 @@ object HaloProtocol {
     const val IMU_READ = 0x53
     const val TAP_CONFIG = 0x54
     const val HRP = 0x60
+    /** host→dev: persist a packed sprite asset under `spr_<key>` for cached defines. */
+    const val SPRITE_STORE = 0x61
     const val STATUS = 0x70
     const val ERROR = 0x71
     const val DEVICE_STATUS = 0x72
+    /** dev→host: acknowledges a `SPRITE_STORE`; payload is the stored key. */
+    const val SPRITE_STORED = 0x73
 
     /** Subcommand bytes for [SYSTEM] messages (see `he_runtime.lua` `handle_system`). */
     const val SYS_DISPLAY_SLEEP = 0x00

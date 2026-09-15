@@ -5,6 +5,7 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertTrue
 
 class HsdHrpCompilerTest {
     private val json = Json { ignoreUnknownKeys = true }
@@ -41,6 +42,62 @@ class HsdHrpCompilerTest {
         assertFailsWith<IllegalArgumentException> {
             HsdHrpCompiler(StubSpritePacker()).compile(json.parseToJsonElement("""{"scene":{"children":[{"type":"point","x":256,"y":0}]}}"""))
         }
+    }
+
+    @Test
+    fun cacheSpritesEmitsCachedDefineAndAssets() {
+        val scene = json.parseToJsonElement(
+            """{"scene":{"children":[{"type":"sprite","src":"mem://icon","x":4,"y":4,"w":2,"h":2,"bpp":1}]}}"""
+        )
+        val compiled = HsdHrpCompiler(TinyPacker, cacheSprites = true).compileDetailed(scene)
+
+        val defines = commands(compiled.frame).filter { it.first == 0x10 || it.first == 0x0A }
+        assertEquals(1, defines.size)
+        assertEquals(0x10, defines[0].first, "cache mode must emit the cached-define opcode")
+        assertEquals(1, compiled.spriteAssets.size)
+        val key = compiled.spriteAssets.keys.single()
+        assertTrue(key.matches(Regex("[A-Za-z0-9_-]{1,64}")), "derived key must be filename-safe: $key")
+        // The cached-define payload references the stored key: [id u16][key_len][key].
+        val payload = defines[0].second
+        assertEquals(key, String(payload, 3, payload[2].toInt() and 0xFF, Charsets.UTF_8))
+    }
+
+    @Test
+    fun explicitCacheKeyOverridesDerivedKey() {
+        val scene = json.parseToJsonElement(
+            """{"scene":{"children":[{"type":"sprite","src":"mem://icon","cache_key":"icon_nav","x":4,"y":4,"w":2,"h":2,"bpp":1}]}}"""
+        )
+        val compiled = HsdHrpCompiler(TinyPacker, cacheSprites = true).compileDetailed(scene)
+        assertEquals(listOf("icon_nav"), compiled.spriteAssets.keys.toList())
+    }
+
+    @Test
+    fun cacheKeyWithoutAutoModeAssertsStoredAsset() {
+        // Explicit cache_key alone skips packing entirely — the caller asserts
+        // the asset is already on-device (no packer invoked, no asset returned).
+        val scene = json.parseToJsonElement(
+            """{"scene":{"children":[{"type":"sprite","src":"mem://icon","cache_key":"icon_nav","x":4,"y":4,"bpp":1}]}}"""
+        )
+        val compiled = HsdHrpCompiler(StubSpritePacker()).compileDetailed(scene)
+        val defines = commands(compiled.frame).filter { it.first == 0x10 }
+        assertEquals(1, defines.size)
+        assertTrue(compiled.spriteAssets.isEmpty())
+    }
+
+    @Test
+    fun cacheKeyMustBeFilenameSafe() {
+        val scene = json.parseToJsonElement(
+            """{"scene":{"children":[{"type":"sprite","src":"mem://icon","cache_key":"../escape","x":4,"y":4,"bpp":1}]}}"""
+        )
+        assertFailsWith<IllegalArgumentException> { HsdHrpCompiler(StubSpritePacker()).compile(scene) }
+    }
+
+    private object TinyPacker : SpritePacker {
+        override fun pack(src: String, width: Int?, height: Int?, bpp: Int) = SpritePacker.Sprite(
+            width = 2, height = 2, bpp = 1, numColors = 2,
+            paletteData = byteArrayOf(0, 0, 0, -1, -1, -1),
+            pixelData = byteArrayOf(1, 1, 1, 1),
+        )
     }
 
     private fun commands(payload: ByteArray): List<Pair<Int, ByteArray>> {

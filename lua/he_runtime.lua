@@ -20,17 +20,24 @@ local AUDIO_FINAL = 0x06
 local PHOTO_JPEG = 0x07
 local PHOTO_FINAL = 0x08
 local HRP_CODE = 0x60
+local SPRITE_STORE = 0x61
 local TAP_CODE = 0x09
 local IMU_CODE = 0x0A
 local BUTTON_CODE = 0x0B
 local BATTERY_CODE = 0x72
 local STATUS_CODE = 0x70
 local ERROR_CODE = 0x71
+local SPRITE_STORED = 0x73
 local MAX_DATA_BYTES = 32768
+
+-- Sprite file cache: packed assets persist as spr_<key> (hex-encoded) so
+-- repeated presentations can use the cached-define HRP opcode instead of
+-- re-uploading pixels. Bounded to keep flash usage predictable.
+local MAX_SPRITE_CACHE = 32
 
 -- Bumped on every runtime change; advertised in STATUS as ;rt=<version> so
 -- hosts can skip re-upload when the autorunning runtime is already current.
-local RUNTIME_VERSION = '3.1'
+local RUNTIME_VERSION = '3.2'
 
 local QUALITIES = { 'VERY_LOW', 'LOW', 'MEDIUM', 'HIGH', 'VERY_HIGH' }
 local SOUND_PRESETS = { pickup = true, laser = true, explosion = true,
@@ -167,6 +174,107 @@ local function parse_sprite(payload)
     }
 end
 
+-- Sprite file cache (spr_<key> files). Assets are stored hex-encoded so the
+-- cache survives text-mode file APIs; keys are restricted to a filename-safe
+-- alphabet and a small bound keeps flash usage predictable.
+local function valid_cache_key(key)
+    return #key >= 1 and #key <= 64 and key:match('^[A-Za-z0-9_%-]+$') ~= nil
+end
+
+local function to_hex(data)
+    return (data:gsub('.', function(c)
+        return string.format('%02x', string.byte(c))
+    end))
+end
+
+local function from_hex(data)
+    if #data % 2 ~= 0 then error('corrupt sprite cache entry') end
+    return (data:gsub('..', function(cc)
+        local b = tonumber(cc, 16)
+        if b == nil then error('corrupt sprite cache entry') end
+        return string.char(b)
+    end))
+end
+
+local function sprite_cache_read(key)
+    local ok, f = pcall(frame.file.open, 'spr_' .. key, 'r')
+    if not ok or f == nil then return nil end
+    local chunks = {}
+    while true do
+        local ok_r, chunk = pcall(function() return f:read() end)
+        if not ok_r or chunk == nil then break end
+        chunks[#chunks + 1] = chunk
+    end
+    f:close()
+    if #chunks == 0 then return nil end
+    local ok_h, asset = pcall(from_hex, table.concat(chunks))
+    if not ok_h then return nil end
+    return asset
+end
+
+-- Firmware returns a Lua table from listdir; the Python emulator bridges a
+-- 0-based userdata list that raises past the end -- normalize both.
+local function sprite_cache_names()
+    local ok, names = pcall(frame.file.listdir)
+    if not ok or names == nil then return {} end
+    local out = {}
+    if type(names) == 'table' then
+        for _, name in ipairs(names) do out[#out + 1] = name end
+    else
+        local i = 0
+        while true do
+            local ok_i, name = pcall(function() return names[i] end)
+            if not ok_i or name == nil then break end
+            out[#out + 1] = name
+            i = i + 1
+        end
+    end
+    return out
+end
+
+local function sprite_cache_evict_one()
+    local names = sprite_cache_names()
+    table.sort(names)
+    for _, name in ipairs(names) do
+        if name:sub(1, 4) == 'spr_' then
+            pcall(frame.file.remove, name)
+            return
+        end
+    end
+end
+
+local function sprite_cache_count()
+    local n = 0
+    for _, name in ipairs(sprite_cache_names()) do
+        if name:sub(1, 4) == 'spr_' then n = n + 1 end
+    end
+    return n
+end
+
+local function store_sprite(payload)
+    require_len(payload, 1, 1)
+    local key_len = string.byte(payload, 1)
+    require_len(payload, 2, key_len)
+    local key = string.sub(payload, 2, 1 + key_len)
+    if not valid_cache_key(key) then error('invalid sprite cache key') end
+    local asset = string.sub(payload, 2 + key_len)
+    if #asset < 7 then error('sprite store: asset too small') end
+    local name = 'spr_' .. key
+    local ok_open, existing = pcall(frame.file.open, name, 'r')
+    if ok_open and existing ~= nil then
+        existing:close()
+        return key
+    end
+    if sprite_cache_count() >= MAX_SPRITE_CACHE then
+        sprite_cache_evict_one()
+    end
+    local ok_w, wf = pcall(frame.file.open, name, 'w')
+    if not ok_w or wf == nil then error('sprite store: cannot write ' .. name) end
+    wf:write(to_hex(asset))
+    wf:close()
+    return key
+end
+
 local function execute_hrp(payload)
     if #payload > MAX_DATA_BYTES then error('HRP frame exceeds runtime limit') end
     if string.sub(payload, 1, 4) ~= 'HRP1' or string.byte(payload, 5) ~= 0 then
@@ -242,6 +350,17 @@ local function execute_hrp(payload)
             -- show() is no-op on Halo
         elseif opcode == 0x0F then
             -- feature negotiation, no-op in v2
+        elseif opcode == 0x10 then
+            -- cached sprite define: [id u16][key_len u8][key utf8]
+            require_len(command, 1, 3)
+            local id = u16(command, 1)
+            local key_len = string.byte(command, 3)
+            require_len(command, 4, key_len)
+            local key = string.sub(command, 4, 3 + key_len)
+            if not valid_cache_key(key) then error('invalid sprite cache key') end
+            local asset = sprite_cache_read(key)
+            if asset == nil then error('sprite cache miss: ' .. key) end
+            parse_sprite(string.char(id >> 8, id & 0xFF) .. asset)
         else
             error('unknown HRP opcode ' .. tostring(opcode))
         end
@@ -566,8 +685,10 @@ local function send_status()
     pcall(function() if mpix_available() then mpix_suffix = ';mpix' end end)
     local lz4_suffix = ''
     pcall(function() if frame.compression ~= nil then lz4_suffix = ',lz4' end end)
+    local cache_suffix = ''
+    pcall(function() if frame.file ~= nil then cache_suffix = ',spritecache' end end)
     send_event(STATUS_CODE, 'HRP1;primitives,sprites,click,tap,mic,speaker,photo,battery,sound,system,time,imu'
-        .. mpix_suffix .. lz4_suffix
+        .. mpix_suffix .. lz4_suffix .. cache_suffix
         .. ';fw=' .. fw_version .. ';rt=' .. RUNTIME_VERSION .. eui_suffix .. wake_suffix)
 end
 
@@ -713,6 +834,13 @@ local function handle_message(code, payload)
     elseif code == TAP_CONFIG then
         local ok, err = pcall(handle_tap_config, payload)
         if not ok then send_event(ERROR_CODE, tostring(err)) end
+    elseif code == SPRITE_STORE then
+        local ok, res = pcall(store_sprite, payload)
+        if ok then
+            send_event(SPRITE_STORED, res)
+        else
+            send_event(ERROR_CODE, tostring(res))
+        end
     elseif code == STATUS_CODE then
         pcall(send_status)
     else

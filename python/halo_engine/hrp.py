@@ -12,6 +12,18 @@ from .limits import STOCK_HALO, validate_hrp_size
 MAGIC = b"HRP1"
 VERSION_FLAGS = 0
 HRP_CODE = 0x60
+# host→dev: persist a packed sprite asset under `spr_<key>` for cached defines.
+SPRITE_STORE = 0x61
+# dev→host: acknowledges SPRITE_STORE; payload is the stored key.
+SPRITE_STORED = 0x73
+
+
+def sprite_store_payload(key: str, asset: bytes) -> bytes:
+    """`SPRITE_STORE` message payload: `[key_len u8][key utf8][packed asset]`."""
+    key_bytes = key.encode("utf-8")
+    if not 1 <= len(key_bytes) <= 64:
+        raise ValueError("sprite cache key must be 1..64 bytes")
+    return bytes((len(key_bytes),)) + key_bytes + asset
 
 CLEAR = 0x01
 BRIGHTNESS = 0x02
@@ -25,6 +37,7 @@ TEXT = 0x09
 SPRITE_DEFINE = 0x0A
 SPRITE_DRAW = 0x0B
 SPRITE_RELEASE = 0x0C
+SPRITE_DEFINE_CACHED = 0x10
 DIRTY_REGION = 0x0D
 END_FRAME = 0x0E
 FEATURES = 0x0F
@@ -119,6 +132,16 @@ class HrpBuilder:
 
     def sprite_release(self, sprite_id: int) -> "HrpBuilder":
         return self.add(SPRITE_RELEASE, _u16(sprite_id))
+
+    def sprite_define_cached(self, sprite_id: int, key: str) -> "HrpBuilder":
+        """Define sprite `sprite_id` from a device-cached asset (`spr_<key>`
+        written by a prior SPRITE_STORE message)."""
+        key_bytes = key.encode("utf-8")
+        if not 0 <= sprite_id <= 0xFFFF:
+            raise ValueError("sprite id must fit in uint16")
+        if not 1 <= len(key_bytes) <= 64:
+            raise ValueError("sprite cache key must be 1..64 bytes")
+        return self.add(SPRITE_DEFINE_CACHED, _u16(sprite_id) + bytes((len(key_bytes),)) + key_bytes)
 
     def dirty_region(self, x: int, y: int, w: int, h: int) -> "HrpBuilder":
         return self.add(DIRTY_REGION, _u16(x) + _u16(y) + _u16(w) + _u16(h))

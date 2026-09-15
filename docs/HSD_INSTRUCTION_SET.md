@@ -166,8 +166,9 @@ All elements support:
 | `bpp` | int | `1`, `2`, or `4` (default `4`) |
 | `palette_offset` | int | 0–15, added to non-zero indices (default `0`) |
 | `scale_x`, `scale_y` | int | Integer scale for the Lua compiler. The separate HRP compiler currently requires both to be `1`. |
+| `cache_key` | string | Optional stable device-cache key (`[A-Za-z0-9_-]{1,64}`). With `cacheSprites` compilation the packed asset is stored under this key; without it, the key is asserted to already exist on-device (`SPRITE_STORE`/`precacheSprite`) and packing is skipped. |
 
-Sprites are quantized to ≤16 colors and transmitted as a binary asset, then drawn with `frame.display.bitmap()`.
+Sprites are quantized to ≤16 colors and transmitted as a binary asset, then drawn with `frame.display.bitmap()`. When the runtime advertises `spritecache` (rt ≥ 3.2), hosts compile with `cacheSprites`/`cache_sprites`: each sprite emits a cached define (opcode `0x10`) keyed by a content hash, and the packed asset is persisted once via `SPRITE_STORE` — repeat presents skip the pixel upload.
 
 ### `group`
 
