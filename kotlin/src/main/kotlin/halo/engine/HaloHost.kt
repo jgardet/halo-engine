@@ -27,8 +27,8 @@ class HaloHost(
     }
 
     /** Send an already packed asset through the transport's data channel. */
-    suspend fun sendSprite(sprite: SpritePacker.Sprite, resourceId: Int = 1) {
-        val packed = packSpriteAsset(sprite)
+    suspend fun sendSprite(sprite: SpritePacker.Sprite, resourceId: Int = 1, compress: Boolean = false) {
+        val packed = packSpriteAsset(sprite, compress = compress)
         require(packed.size <= limits.maxAssetBytes) { "Sprite exceeds conservative stock asset budget" }
         showHrp(HrpBuilder(limits.maxHrpMessageBytes).spriteDefine(resourceId, packed).endFrame().build())
     }

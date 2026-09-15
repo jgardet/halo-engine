@@ -31,9 +31,9 @@ class SpriteAsset:
             return 4
         return 16
 
-    def packed(self) -> bytes:
+    def packed(self, compress: bool = False) -> bytes:
         """Pack into the on-wire TxSprite format."""
-        return pack_sprite_asset(self)
+        return pack_sprite_asset(self, compress=compress)
 
 
 def pack_sprite(
@@ -149,20 +149,29 @@ def _pack_4bit(data: bytes) -> bytes:
     return out.tobytes()
 
 
-def pack_sprite_asset(sprite: SpriteAsset) -> bytes:
+def pack_sprite_asset(sprite: SpriteAsset, compress: bool = False) -> bytes:
     """Pack a sprite into the wire format expected by the device-side sprite library."""
     import struct
 
     packed_pixels = pack_bits(sprite.pixel_data, sprite.bpp)
+    pixels = packed_pixels
+    compressed = 0
+    if compress:
+        import lz4.frame
+
+        candidate = lz4.frame.compress(packed_pixels)
+        if len(candidate) < len(packed_pixels):
+            pixels = candidate
+            compressed = 1
     header = struct.pack(
         ">HHBBB",
         sprite.width,
         sprite.height,
-        0,  # compressed flag
+        compressed,
         sprite.bpp,
         sprite.num_colors,
     )
-    return header + sprite.palette_data + packed_pixels
+    return header + sprite.palette_data + pixels
 
 
 def sprite_to_lua_args(sprite: SpriteAsset, palette_offset: int = 0) -> str:

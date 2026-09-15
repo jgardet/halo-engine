@@ -55,3 +55,67 @@ def test_scene_compiles_to_binary_hrp():
     scene = {"scene": {"bg": "#000000", "children": [{"type": "rect", "x": 1, "y": 2, "w": 3, "h": 4, "filled": True}]}}
     payload = compile_scene_hrp(scene)
     assert decode_frame(payload)[-1][0] == 0x0E
+
+
+def test_pack_sprite_asset_lz4_flag_and_roundtrip():
+    import lz4.frame
+
+    from halo_engine.sprite import SpriteAsset, pack_bits, pack_sprite_asset
+
+    # Highly compressible pixels: a solid-color 4bpp sprite.
+    sprite = SpriteAsset(
+        width=64,
+        height=64,
+        bpp=4,
+        num_colors=2,
+        palette_data=bytes((0, 0, 0, 255, 255, 255)),
+        pixel_data=bytes([1] * (64 * 64)),
+    )
+    plain = pack_sprite_asset(sprite)
+    packed = pack_sprite_asset(sprite, compress=True)
+    # compressed flag is asset byte 4: [w u16][h u16][flag][bpp][colors]
+    assert plain[4] == 0
+    assert packed[4] == 1
+    assert len(packed) < len(plain)
+    # Header + palette (7 + 6 bytes) are untouched except the flag byte;
+    # the pixel tail is an LZ4 frame that decodes back to packed indices.
+    assert plain[:4] == packed[:4]
+    assert plain[5:13] == packed[5:13]
+    assert lz4.frame.decompress(packed[13:]) == plain[13:] == pack_bits(sprite.pixel_data, sprite.bpp)
+
+
+def test_pack_sprite_asset_compress_keeps_incompressible_pixels():
+    from halo_engine.sprite import SpriteAsset, pack_sprite_asset
+
+    # Incompressible pixel data falls back to the uncompressed tail.
+    sprite = SpriteAsset(
+        width=4,
+        height=4,
+        bpp=4,
+        num_colors=2,
+        palette_data=bytes((0, 0, 0, 255, 255, 255)),
+        pixel_data=bytes(range(16)),
+    )
+    packed = pack_sprite_asset(sprite, compress=True)
+    assert packed[4] == 0
+    assert packed == pack_sprite_asset(sprite)
+
+
+def test_compile_scene_hrp_lz4_sprites():
+    import base64
+    import io
+
+    import lz4.frame
+    from PIL import Image
+
+    img = Image.new("RGB", (16, 16), (255, 255, 255))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    scene = {"scene": {"children": [{"type": "sprite", "src": uri, "x": 0, "y": 0, "bpp": 4}]}}
+    commands = decode_frame(compile_scene_hrp(scene, lz4_sprites=True))
+    define = next(p for op, p in commands if op == 0x0A)
+    # spriteDefine payload: [id u16][asset]; flag sits at asset byte 4.
+    assert define[6] == 1
+    num_colors = define[8]
+    lz4.frame.decompress(define[2 + 7 + num_colors * 3:])
