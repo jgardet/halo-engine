@@ -126,6 +126,7 @@ class HaloSession(
         timeout: Duration,
         maxBytes: Long = Long.MAX_VALUE,
         stopAfter: Duration? = null,
+        shouldStopEarly: (ByteArray) -> Boolean = { false },
     ): ByteArray = coroutineScope {
         currentCoroutineContext().ensureActive()
         val finalSignal = CompletableDeferred<Unit>()
@@ -149,6 +150,13 @@ class HaloSession(
                             }
                             output.write(chunk)
                             written += chunk.size
+                            // Caller-side early stop (e.g. trailing-silence
+                            // detection): send the stop code once and keep
+                            // collecting until FINAL arrives.
+                            if (stopCode != null && shouldStopEarly(chunk) &&
+                                !finalSignal.isCompleted && stopSent.compareAndSet(false, true)) {
+                                launch { runCatching { send(stopCode, stopPayload) } }
+                            }
                         }
                         finalCode -> finalSignal.complete(Unit)
                         HaloProtocol.ERROR -> finalSignal.completeExceptionally(

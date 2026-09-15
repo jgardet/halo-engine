@@ -180,6 +180,35 @@ class HaloSessionTest {
     }
 
     @Test
+    fun sendsStopEarlyWhenPredicateFires() = runTest {
+        val result = async {
+            session.collect(
+                startCode = HaloProtocol.MICROPHONE_START,
+                startPayload = byteArrayOf(),
+                stopCode = HaloProtocol.MICROPHONE_STOP,
+                chunkCode = HaloProtocol.AUDIO_CHUNK,
+                finalCode = HaloProtocol.AUDIO_FINAL,
+                timeout = 5.seconds,
+                shouldStopEarly = { chunk -> chunk.size > 2 },
+            )
+        }
+
+        launch {
+            delay(10)
+            transport.emitMessage(HaloProtocol.AUDIO_CHUNK, byteArrayOf(1, 2))
+            transport.emitMessage(HaloProtocol.AUDIO_CHUNK, byteArrayOf(3, 4, 5))
+            // Give the early-stop send time to land before the device final.
+            delay(10)
+            transport.emitMessage(HaloProtocol.AUDIO_FINAL, byteArrayOf())
+        }
+
+        assertContentEquals(byteArrayOf(1, 2, 3, 4, 5), result.await())
+        assertEquals(2, transport.dataChunks.size)
+        assertEquals(HaloProtocol.MICROPHONE_START, transport.dataChunks[0][0].toInt() and 0xff)
+        assertEquals(HaloProtocol.MICROPHONE_STOP, transport.dataChunks[1][0].toInt() and 0xff)
+    }
+
+    @Test
     fun noStopCodeWhenNotProvided() = runTest {
         val result = async {
             session.collect(
