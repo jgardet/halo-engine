@@ -311,30 +311,31 @@ def test_runtime_nav_hud(tmp_path):
         emu.set_imu_raw((50.0, 0.0, -40.0), (0.0, 0.0, 1000.0))
 
         # Maneuver due east, 350 m → relative bearing ~90° → arrow tip right.
+        # HUD sits in the upper half: arrow center (128, 64), tip radius 40.
         emu.inject_bluetooth_data(_message(HUD_SET, _hud_set(90, 350, "Turn left")))
         time.sleep(0.5)
         assert not _errors(emu.get_bluetooth_sent())
         img = emu.get_framebuffer()
-        assert _probe(img, 172, 112, 14), "arrow tip should point right (bearing 90 - heading 0)"
-        assert not _probe(img, 128, 54), "nothing should be drawn above center"
-        # Distance readout "350 m" below center.
-        assert _probe(img, 128, 180, 12), "distance text should be drawn"
+        assert _probe(img, 164, 64, 12), "arrow tip should point right (bearing 90 - heading 0)"
+        assert not _probe(img, 128, 16, 4), "nothing should be drawn above the arrow"
+        # Distance readout "350 m" below the arrow.
+        assert _probe(img, 128, 130, 10), "distance text should be drawn"
 
         # User turns to face east (compass y goes negative) → arrow should
         # rotate to point up once the smoothed heading converges (~2 s).
         emu.set_imu_raw((0.0, -50.0, -40.0), (0.0, 0.0, 1000.0))
         time.sleep(2.5)
         img = emu.get_framebuffer()
-        assert _probe(img, 128, 58, 10), "arrow tip should now point up (relative ~0)"
-        assert not _probe(img, 186, 112), "old tip position should be cleared"
+        assert _probe(img, 128, 26, 8), "arrow tip should now point up (relative ~0)"
+        assert not _probe(img, 172, 64, 8), "old tip position should be cleared"
 
         # A new cue retargets the arrow: bearing 270 with heading ~90 →
         # relative ~180 → arrow tip points down.
         emu.inject_bluetooth_data(_message(HUD_SET, _hud_set(270, 40, "Arrive")))
         time.sleep(2.5)
         img = emu.get_framebuffer()
-        assert _probe(img, 128, 160, 10), "bearing 270 - heading 90 → tip down"
-        assert not _probe(img, 186, 112), "tip should no longer point right"
+        assert _probe(img, 128, 102, 8), "bearing 270 - heading 90 → tip down"
+        assert not _probe(img, 168, 64, 6), "tip should no longer point right"
 
         # Mode 0 disarms: no more redraws, no errors.
         emu.inject_bluetooth_data(_message(HUD_SET, bytes((0,))))

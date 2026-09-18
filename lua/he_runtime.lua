@@ -571,7 +571,9 @@ local HUD_MODE_NAV = 1
 local HUD_TICK_S = 0.25          -- heading poll cadence
 local HUD_REDRAW_DEG = 3.0       -- min heading change to justify a redraw
 local HUD_SMOOTH_ALPHA = 0.35    -- exponential low-pass on azimuth
-local HUD_MAX_INSTRUCTION = 24
+local HUD_MAX_INSTRUCTION = 40   -- wraps to HUD_MAX_LINES of HUD_LINE_CHARS
+local HUD_LINE_CHARS = 20        -- ~160 px at Dogica size 8
+local HUD_MAX_LINES = 2
 
 local hud = nil                  -- { bearing, distance_m, instruction }
 local hud_heading = nil          -- smoothed device azimuth, deg
@@ -629,17 +631,53 @@ local function hud_center_text(s, y, color)
     frame.display.text(s, math.max(1, 128 - w // 2), y, color)
 end
 
+-- Greedy word-wrap into at most max_lines lines of width chars; truncates
+-- the last line with '...' when words remain (ASCII only: the emulator
+-- loads Lua sources as latin-1).
+local function hud_wrap(text, width, max_lines)
+    local lines = {}
+    local cur = ''
+    local overflow = false
+    for word in string.gmatch(text, '%S+') do
+        if overflow then break end
+        local candidate = (cur == '') and word or (cur .. ' ' .. word)
+        if #candidate <= width then
+            cur = candidate
+        elseif cur == '' then
+            lines[#lines + 1] = string.sub(word, 1, width - 3) .. '...'
+            overflow = true
+        else
+            lines[#lines + 1] = cur
+            cur = word
+            overflow = (#lines == max_lines)
+        end
+    end
+    if not overflow and cur ~= '' then
+        lines[#lines + 1] = cur
+    end
+    if overflow and #lines >= max_lines then
+        local last = lines[max_lines]
+        if #last > width - 3 then
+            last = string.sub(last, 1, width - 3)
+        end
+        lines[max_lines] = last .. '...'
+    end
+    return lines
+end
+
+-- Layout sits in the upper half of the circular display (arrow center y=64,
+-- text below): the lower half is outside the waveguide's sweet spot. The
+-- ring is the viewport bezel: display-centered, not part of the content.
 local function hud_draw(rel_deg)
     frame.display.clear(0x000000)
-    local cx, cy = 128, 112
-    -- Compass ring (inside the circular bezel) and cardinal tick at top.
-    frame.display.circle(cx, cy, 104, 0x303030, false)
+    frame.display.circle(128, 128, 120, 0x303030, false)
+    local cx, cy = 128, 64
     local theta = rel_deg * math.pi / 180.0
     -- Arrow: tip + wings + notch (forward, side) local coords.
-    local tip_x, tip_y = hud_point(cx, cy, 50, 0, theta)
-    local wing1_x, wing1_y = hud_point(cx, cy, -14, 32, theta)
+    local tip_x, tip_y = hud_point(cx, cy, 40, 0, theta)
+    local wing1_x, wing1_y = hud_point(cx, cy, -12, 26, theta)
     local notch_x, notch_y = hud_point(cx, cy, -2, 0, theta)
-    local wing2_x, wing2_y = hud_point(cx, cy, -14, -32, theta)
+    local wing2_x, wing2_y = hud_point(cx, cy, -12, -26, theta)
     frame.display.polygon(
         { tip_x, tip_y, wing1_x, wing1_y, notch_x, notch_y, wing2_x, wing2_y },
         0x00D0FF
@@ -652,10 +690,13 @@ local function hud_draw(rel_deg)
     else
         dist_s = string.format('%d m', dist)
     end
-    hud_center_text(dist_s, 176, 0xFFFFFF)
-    -- Instruction line, bounded for the circular display.
+    hud_center_text(dist_s, 128, 0xFFFFFF)
+    -- Instruction wrapped over up to HUD_MAX_LINES lines.
     if hud.instruction ~= nil and #hud.instruction > 0 then
-        hud_center_text(hud.instruction, 196, 0xB0B0B0)
+        local lines = hud_wrap(hud.instruction, HUD_LINE_CHARS, HUD_MAX_LINES)
+        for i = 1, #lines do
+            hud_center_text(lines[i], 148 + (i - 1) * 18, 0xB0B0B0)
+        end
     end
 end
 
