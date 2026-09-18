@@ -277,4 +277,28 @@ object HaloCommands {
         waitForTimeout?.let { out.add(if (it) 1 else 0) }
         return out.toByteArray()
     }
+
+    /**
+     * `HUD_SET` (0x55): `[mode][bearing_deg u16][distance_m u16][instruction]`.
+     * `mode` 0 clears the device-local HUD; `mode` 1 shows a nav HUD whose
+     * arrow tracks the glasses' own compass — the device redraws locally and
+     * needs no further host traffic until the next cue.
+     */
+    fun hudSet(
+        bearingDeg: Int,
+        distanceMeters: Int,
+        instruction: String = "",
+    ): ByteArray {
+        require(bearingDeg in 0..359) { "bearingDeg out of range: $bearingDeg" }
+        require(distanceMeters in 0..0xFFFF) { "distanceMeters out of range: $distanceMeters" }
+        val text = instruction.toByteArray(Charsets.UTF_8)
+        return byteArrayOf(
+            1,
+            (bearingDeg ushr 8).toByte(), bearingDeg.toByte(),
+            (distanceMeters ushr 8).toByte(), distanceMeters.toByte(),
+        ) + text
+    }
+
+    /** `HUD_SET` (0x55) mode 0 — stop the device-local HUD. */
+    fun hudClear(): ByteArray = byteArrayOf(0)
 }

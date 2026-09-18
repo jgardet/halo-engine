@@ -42,6 +42,8 @@ object HaloProtocol {
     const val SET_TIME = 0x52
     const val IMU_READ = 0x53
     const val TAP_CONFIG = 0x54
+    /** host→dev: set/clear the device-local navigation HUD (see `he_runtime.lua`). */
+    const val HUD_SET = 0x55
     const val HRP = 0x60
     /** host→dev: persist a packed sprite asset under `spr_<key>` for cached defines. */
     const val SPRITE_STORE = 0x61

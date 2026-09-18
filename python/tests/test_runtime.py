@@ -270,6 +270,80 @@ def test_runtime_sprite_cache(tmp_path):
         emu.stop()
 
 
+HUD_SET = 0x55
+
+
+def _hud_set(bearing_deg: int, distance_m: int, instruction: str) -> bytes:
+    return bytes(
+        (
+            1,
+            bearing_deg >> 8,
+            bearing_deg & 0xFF,
+            distance_m >> 8,
+            distance_m & 0xFF,
+        )
+    ) + instruction.encode()
+
+
+def _probe(img, x: int, y: int, spread: int = 8) -> bool:
+    """True if any pixel near (x, y) is lit (non-black)."""
+    for dx in range(-spread, spread + 1, 2):
+        for dy in range(-spread, spread + 1, 2):
+            px = img.getpixel((x + dx, y + dy))
+            if px[0] + px[1] + px[2] > 60:
+                return True
+    return False
+
+
+def test_runtime_nav_hud(tmp_path):
+    """HUD_SET arms a device-local nav HUD: the arrow tracks the glasses'
+    compass with no further host traffic, and mode 0 disarms it."""
+    shutil.copy2(PROJECT_LUA, tmp_path / "main.lua")
+    emu = HaloEmulator(sandbox_dir=tmp_path)
+    emu.start("main.lua")
+    try:
+        time.sleep(0.1)
+        sent = emu.get_bluetooth_sent()
+        assert any(item.startswith(b"\x70HRP1;") and b"hud" in item for item in sent)
+
+        # Level device pointing north: compass x = forward ≈ 50 µT north.
+        emu.set_imu_direction(0.0, 0.0, 0.0)
+        emu.set_imu_raw((50.0, 0.0, -40.0), (0.0, 0.0, 1000.0))
+
+        # Maneuver due east, 350 m → relative bearing ~90° → arrow tip right.
+        emu.inject_bluetooth_data(_message(HUD_SET, _hud_set(90, 350, "Turn left")))
+        time.sleep(0.5)
+        assert not _errors(emu.get_bluetooth_sent())
+        img = emu.get_framebuffer()
+        assert _probe(img, 172, 112, 14), "arrow tip should point right (bearing 90 - heading 0)"
+        assert not _probe(img, 128, 54), "nothing should be drawn above center"
+        # Distance readout "350 m" below center.
+        assert _probe(img, 128, 180, 12), "distance text should be drawn"
+
+        # User turns to face east (compass y goes negative) → arrow should
+        # rotate to point up once the smoothed heading converges (~2 s).
+        emu.set_imu_raw((0.0, -50.0, -40.0), (0.0, 0.0, 1000.0))
+        time.sleep(2.5)
+        img = emu.get_framebuffer()
+        assert _probe(img, 128, 58, 10), "arrow tip should now point up (relative ~0)"
+        assert not _probe(img, 186, 112), "old tip position should be cleared"
+
+        # A new cue retargets the arrow: bearing 270 with heading ~90 →
+        # relative ~180 → arrow tip points down.
+        emu.inject_bluetooth_data(_message(HUD_SET, _hud_set(270, 40, "Arrive")))
+        time.sleep(2.5)
+        img = emu.get_framebuffer()
+        assert _probe(img, 128, 160, 10), "bearing 270 - heading 90 → tip down"
+        assert not _probe(img, 186, 112), "tip should no longer point right"
+
+        # Mode 0 disarms: no more redraws, no errors.
+        emu.inject_bluetooth_data(_message(HUD_SET, bytes((0,))))
+        time.sleep(0.3)
+        assert not _errors(emu.get_bluetooth_sent())
+    finally:
+        emu.stop()
+
+
 def test_runtime_status_query_replies_with_caps(tmp_path):
     """A host STATUS query must answer with the capability string so the
     connect probe can detect an already-running (autorun) runtime."""

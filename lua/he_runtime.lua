@@ -15,6 +15,7 @@ local SYSTEM = 0x51
 local SET_TIME = 0x52
 local IMU_READ = 0x53
 local TAP_CONFIG = 0x54
+local HUD_SET = 0x55
 local AUDIO_CHUNK = 0x05
 local AUDIO_FINAL = 0x06
 local PHOTO_JPEG = 0x07
@@ -37,7 +38,7 @@ local MAX_SPRITE_CACHE = 32
 
 -- Bumped on every runtime change; advertised in STATUS as ;rt=<version> so
 -- hosts can skip re-upload when the autorunning runtime is already current.
-local RUNTIME_VERSION = '3.2'
+local RUNTIME_VERSION = '3.3'
 
 local QUALITIES = { 'VERY_LOW', 'LOW', 'MEDIUM', 'HIGH', 'VERY_HIGH' }
 local SOUND_PRESETS = { pickup = true, laser = true, explosion = true,
@@ -552,6 +553,169 @@ local function send_imu()
         accel.x or 0, accel.y or 0, accel.z or 0))
 end
 
+-- ---------------------------------------------------------------------------
+-- Navigation HUD (HUD_SET, 0x55)
+--
+-- The host sets a maneuver {absolute bearing, distance, instruction} once per
+-- cue; the device then tracks heading locally and rotates the arrow with no
+-- further BLE traffic. Heading is computed on-device from frame.imu.raw()
+-- (firmware direction().heading is a stub) using the same tilt-compensated
+-- azimuth math as the host-side HeadingMath.
+--
+-- Payload: [mode u8][bearing_deg u16][distance_m u16][instruction utf8]
+--   mode 0 = off, mode 1 = nav HUD.
+-- ---------------------------------------------------------------------------
+
+local HUD_MODE_OFF = 0
+local HUD_MODE_NAV = 1
+local HUD_TICK_S = 0.25          -- heading poll cadence
+local HUD_REDRAW_DEG = 3.0       -- min heading change to justify a redraw
+local HUD_SMOOTH_ALPHA = 0.35    -- exponential low-pass on azimuth
+local HUD_MAX_INSTRUCTION = 24
+
+local hud = nil                  -- { bearing, distance_m, instruction }
+local hud_heading = nil          -- smoothed device azimuth, deg
+local hud_drawn_rel = nil        -- relative bearing last drawn, deg
+local hud_last_tick = 0.0
+local hud_broken = false         -- disable ticking if imu/math is unusable
+
+local function normalize_deg(d)
+    d = d % 360.0
+    if d < 0 then d = d + 360.0 end
+    return d
+end
+
+-- Tilt-compensated compass azimuth (aerospace axes: x fwd, y right, z down).
+-- Mirrors HeadingMath.azimuth(pitchRad, rollRad, cx, cy, cz).
+local function hud_azimuth()
+    local dir = frame.imu.direction()
+    local raw = frame.imu.raw()
+    local compass = raw.compass or {}
+    local accel = raw.accelerometer or {}
+    local cx, cy, cz = compass.x, compass.y, compass.z
+    if cx == nil or cy == nil or cz == nil then return nil end
+
+    local pitch, roll
+    if dir ~= nil and dir.pitch ~= nil and dir.roll ~= nil then
+        pitch = dir.pitch * math.pi / 180.0
+        roll = dir.roll * math.pi / 180.0
+    else
+        local ax, ay, az = accel.x, accel.y, accel.z
+        if ax == nil or ay == nil or az == nil then return nil end
+        local amag = math.sqrt(ax * ax + ay * ay + az * az)
+        if amag < 1.0 then return nil end
+        ax, ay, az = ax / amag, ay / amag, az / amag
+        roll = math.atan(ay, az)
+        pitch = math.atan(-ax, math.sqrt(ay * ay + az * az))
+    end
+
+    local cosP, sinP = math.cos(pitch), math.sin(pitch)
+    local cosR, sinR = math.cos(roll), math.sin(roll)
+    local xh = cx * cosP + cy * sinR * sinP + cz * cosR * sinP
+    local yh = cy * cosR - cz * sinR
+    return normalize_deg(math.deg(math.atan(-yh, xh)))
+end
+
+-- Rotate arrow-local point (forward t, side s) by bearing theta around (cx, cy).
+local function hud_point(cx, cy, t, s, theta_rad)
+    local sinT, cosT = math.sin(theta_rad), math.cos(theta_rad)
+    return math.floor(cx + t * sinT + s * cosT + 0.5),
+           math.floor(cy - t * cosT + s * sinT + 0.5)
+end
+
+local function hud_center_text(s, y, color)
+    -- Dogica advances ~8px/char at size 8; approximate centering.
+    local w = #s * 8
+    frame.display.text(s, math.max(1, 128 - w // 2), y, color)
+end
+
+local function hud_draw(rel_deg)
+    frame.display.clear(0x000000)
+    local cx, cy = 128, 112
+    -- Compass ring (inside the circular bezel) and cardinal tick at top.
+    frame.display.circle(cx, cy, 104, 0x303030, false)
+    local theta = rel_deg * math.pi / 180.0
+    -- Arrow: tip + wings + notch (forward, side) local coords.
+    local tip_x, tip_y = hud_point(cx, cy, 50, 0, theta)
+    local wing1_x, wing1_y = hud_point(cx, cy, -14, 32, theta)
+    local notch_x, notch_y = hud_point(cx, cy, -2, 0, theta)
+    local wing2_x, wing2_y = hud_point(cx, cy, -14, -32, theta)
+    frame.display.polygon(
+        { tip_x, tip_y, wing1_x, wing1_y, notch_x, notch_y, wing2_x, wing2_y },
+        0x00D0FF
+    )
+    -- Distance readout.
+    local dist = hud.distance_m or 0
+    local dist_s
+    if dist >= 1000 then
+        dist_s = string.format('%.1f km', dist / 1000.0)
+    else
+        dist_s = string.format('%d m', dist)
+    end
+    hud_center_text(dist_s, 176, 0xFFFFFF)
+    -- Instruction line, bounded for the circular display.
+    if hud.instruction ~= nil and #hud.instruction > 0 then
+        hud_center_text(hud.instruction, 196, 0xB0B0B0)
+    end
+end
+
+-- Called every main-loop pass; internally throttled. Redraws only when the
+-- smoothed relative bearing moved more than HUD_REDRAW_DEG.
+local function hud_tick()
+    if hud == nil or hud_broken then return end
+    local now = frame.time.utc()
+    if now - hud_last_tick < HUD_TICK_S then return end
+    hud_last_tick = now
+
+    local ok, az = pcall(hud_azimuth)
+    if not ok then
+        -- No usable imu/math on this firmware: stop ticking rather than
+        -- erroring every loop; the last frame stays on screen.
+        hud_broken = true
+        return
+    end
+    if az == nil then return end
+
+    if hud_heading == nil then
+        hud_heading = az
+    else
+        local delta = ((az - hud_heading + 540.0) % 360.0) - 180.0
+        hud_heading = normalize_deg(hud_heading + HUD_SMOOTH_ALPHA * delta)
+    end
+
+    local rel = normalize_deg(hud.bearing - hud_heading)
+    if hud_drawn_rel ~= nil then
+        local moved = math.abs(((rel - hud_drawn_rel + 540.0) % 360.0) - 180.0)
+        if moved < HUD_REDRAW_DEG then return end
+    end
+    hud_drawn_rel = rel
+    pcall(hud_draw, rel)
+end
+
+local function handle_hud_set(payload)
+    require_len(payload, 1, 1)
+    local mode = string.byte(payload, 1)
+    if mode == HUD_MODE_OFF then
+        hud = nil
+        hud_drawn_rel = nil
+        return
+    end
+    if mode ~= HUD_MODE_NAV then error('unknown hud mode ' .. tostring(mode)) end
+    require_len(payload, 2, 4)
+    local instruction = string.sub(payload, 6)
+    if #instruction > HUD_MAX_INSTRUCTION then
+        instruction = string.sub(instruction, 1, HUD_MAX_INSTRUCTION)
+    end
+    hud = {
+        bearing = u16(payload, 2) % 360,
+        distance_m = u16(payload, 4),
+        instruction = instruction,
+    }
+    hud_drawn_rel = nil
+    hud_broken = false
+    hud_tick()
+end
+
 -- Tap detector tuning. Flags select which fields are present, in order:
 -- b0=mode, b1=axis, b2=threshold(u16), b3=gesture_duration, b4=wait_for_timeout.
 local TAP_MODES = { [0] = 'sensitive', 'normal', 'robust' }
@@ -687,7 +851,7 @@ local function send_status()
     pcall(function() if frame.compression ~= nil then lz4_suffix = ',lz4' end end)
     local cache_suffix = ''
     pcall(function() if frame.file ~= nil then cache_suffix = ',spritecache' end end)
-    send_event(STATUS_CODE, 'HRP1;primitives,sprites,click,tap,mic,speaker,photo,battery,sound,system,time,imu'
+    send_event(STATUS_CODE, 'HRP1;primitives,sprites,click,tap,mic,speaker,photo,battery,sound,system,time,imu,hud'
         .. mpix_suffix .. lz4_suffix .. cache_suffix
         .. ';fw=' .. fw_version .. ';rt=' .. RUNTIME_VERSION .. eui_suffix .. wake_suffix)
 end
@@ -834,6 +998,9 @@ local function handle_message(code, payload)
     elseif code == TAP_CONFIG then
         local ok, err = pcall(handle_tap_config, payload)
         if not ok then send_event(ERROR_CODE, tostring(err)) end
+    elseif code == HUD_SET then
+        local ok, err = pcall(handle_hud_set, payload)
+        if not ok then send_event(ERROR_CODE, tostring(err)) end
     elseif code == SPRITE_STORE then
         local ok, res = pcall(store_sprite, payload)
         if ok then
@@ -871,6 +1038,9 @@ while true do
         end
         if photoPending then
             send_photo()
+        end
+        if hud ~= nil then
+            hud_tick()
         end
         frame.sleep(0.001)
     end)
